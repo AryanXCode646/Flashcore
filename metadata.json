@@ -1,0 +1,6 @@
+{
+  "name": "FlashCore",
+  "description": "Non-root USB OTG bootable media creator supporting Linux Hybrid DD, Windows UEFI with automatic WIM chunking, and Ventoy Multi-Boot.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

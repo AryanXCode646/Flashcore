@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- USB Drive Body -->
+    <path
+        android:pathData="M38,40 h32 v38 c0,4.4 -3.6,8 -8,8 h-16 c-4.4,0 -8,-3.6 -8,-8 Z"
+        android:fillColor="#1E293B"
+        android:strokeColor="#00E5FF"
+        android:strokeWidth="2.5" />
+
+    <!-- USB Metal Connector -->
+    <path
+        android:pathData="M44,24 h20 v16 h-20 Z"
+        android:fillColor="#334155"
+        android:strokeColor="#00E5FF"
+        android:strokeWidth="2" />
+
+    <!-- USB Pins -->
+    <path
+        android:pathData="M48,28 h3 v5 h-3 Z M57,28 h3 v5 h-3 Z"
+        android:fillColor="#00E5FF" />
+
+    <!-- Lightning Bolt / Flash Core Energy -->
+    <path
+        android:pathData="M56,46 L46,60 L53,60 L51,76 L62,58 L55,58 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="46"
+                android:startY="46"
+                android:endX="62"
+                android:endY="76"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#00E5FF" />
+                <item android:offset="1.0" android:color="#FFD600" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>
