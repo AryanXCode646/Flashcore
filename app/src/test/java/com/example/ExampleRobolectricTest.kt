@@ -2,26 +2,26 @@ package com.example
 
 import android.app.Application
 import android.content.Context
-import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ApplicationProvider
+import com.example.dsa.IsoTrieParser
 import com.example.flasher.fsm.FlasherState
 import com.example.ui.FlasherViewModel
 import com.example.ui.screens.MainFlasherScreen
 import com.example.ui.theme.FlashCoreTheme
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.ByteArrayInputStream
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
@@ -38,32 +38,64 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `viewModel initialization and auto target discovery`() {
+    fun `viewModel initial state has no hardcoded virtual device`() {
         val app = ApplicationProvider.getApplicationContext<Application>()
         val viewModel = FlasherViewModel(app)
 
         val state = viewModel.uiState.value
         assertNotNull(state)
-        assertTrue(state.connectedDevices.isNotEmpty())
-        assertNotNull(state.selectedDevice)
+        // Verify no fake drive is created
+        assertTrue(state.connectedDevices.isEmpty())
+        assertNull(state.selectedDevice)
+        assertEquals(FlasherState.Idle, state.fsmState)
         assertEquals("LINUX_RAW_DD", state.selectedStrategyId)
         assertTrue(state.logs.isNotEmpty())
     }
 
     @Test
-    fun `load sample ubuntu iso updates analysis and keeps valid state`() = runTest {
-        val app = ApplicationProvider.getApplicationContext<Application>()
-        val viewModel = FlasherViewModel(app)
+    fun `IsoTrieParser auto detects Linux Kali Ubuntu Arch Fedora Debian Windows`() {
+        fun makeDummyStream(): ByteArrayInputStream {
+            val data = ByteArray(64 * 1024)
+            // Sector 16 PVD magic CD001
+            val magic = "CD001".toByteArray(Charsets.US_ASCII)
+            System.arraycopy(magic, 0, data, 16 * 2048 + 1, magic.size)
+            return ByteArrayInputStream(data)
+        }
 
-        viewModel.loadSampleImage("ubuntu")
-        
-        // Wait or check state
-        val state = viewModel.uiState.value
-        assertNotNull(state)
+        // Test Kali Linux Detection
+        val kaliResult = IsoTrieParser.parse(makeDummyStream(), 3800000000L, fileName = "kali-linux-2024.2-live-amd64.iso")
+        assertEquals("Kali Linux", kaliResult.osName)
+        assertEquals("KALI", kaliResult.distroBadge)
+
+        // Test Ubuntu Detection
+        val ubuntuResult = IsoTrieParser.parse(makeDummyStream(), 5000000000L, fileName = "ubuntu-24.04-desktop-amd64.iso")
+        assertEquals("Ubuntu Linux", ubuntuResult.osName)
+        assertEquals("UBUNTU", ubuntuResult.distroBadge)
+
+        // Test Arch Linux Detection
+        val archResult = IsoTrieParser.parse(makeDummyStream(), 1100000000L, fileName = "archlinux-2024.08.01-x86_64.iso")
+        assertEquals("Arch Linux", archResult.osName)
+        assertEquals("ARCH", archResult.distroBadge)
+
+        // Test Fedora Detection
+        val fedoraResult = IsoTrieParser.parse(makeDummyStream(), 2200000000L, fileName = "Fedora-Workstation-Live-x86_64-40-1.14.iso")
+        assertEquals("Fedora Linux", fedoraResult.osName)
+        assertEquals("FEDORA", fedoraResult.distroBadge)
+
+        // Test Windows 11 Detection
+        val winResult = IsoTrieParser.parse(makeDummyStream(), 6200000000L, fileName = "Win11_23H2_English_x64v2.iso")
+        assertEquals("Windows 11", winResult.osName)
+        assertEquals("WINDOWS", winResult.distroBadge)
+        assertEquals(IsoTrieParser.ImageType.WINDOWS_INSTALLER, winResult.imageType)
+
+        // Test Debian Detection
+        val debianResult = IsoTrieParser.parse(makeDummyStream(), 650000000L, fileName = "debian-12.6.0-amd64-netinst.iso")
+        assertEquals("Debian GNU/Linux", debianResult.osName)
+        assertEquals("DEBIAN", debianResult.distroBadge)
     }
 
     @Test
-    fun `load sample windows iso triggers recommended uefi strategy`() = runTest {
+    fun `strategy selection lifecycle`() = runTest {
         val app = ApplicationProvider.getApplicationContext<Application>()
         val viewModel = FlasherViewModel(app)
 
@@ -79,13 +111,10 @@ class ExampleRobolectricTest {
         val app = ApplicationProvider.getApplicationContext<Application>()
         val viewModel = FlasherViewModel(app)
 
-        // If no image, dialog shouldn't open
+        // If no target device and image, dialog shouldn't open
         viewModel.openSafetyConfirmation()
         assertFalse(viewModel.uiState.value.showSafetyDialog)
 
-        // Load sample image
-        viewModel.loadSampleImage("ubuntu")
-        // Dismiss
         viewModel.dismissSafetyConfirmation()
         assertFalse(viewModel.uiState.value.showSafetyDialog)
     }

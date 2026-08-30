@@ -60,37 +60,16 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
     companion object {
         private const val TAG = "FlasherViewModel"
         const val ACTION_USB_PERMISSION = "com.example.USB_PERMISSION"
-
-        fun createVirtualTargetDrive(): UsbDiskInfo {
-            return UsbDiskInfo(
-                device = null,
-                vendorId = 0x0951,
-                productId = 0x1666,
-                manufacturerName = "Kingston",
-                productName = "DataTraveler 3.0 OTG",
-                vendorString = "Kingston",
-                productString = "DataTraveler 3.0",
-                revision = "PMAP",
-                serialNumber = "001A92B45F12",
-                totalCapacityBytes = 64L * 1024L * 1024L * 1024L, // 64 GB
-                totalSectors = 125829120L,
-                sectorSizeBytes = 512,
-                isRemovable = true,
-                isWriteProtected = false,
-                hasPermission = true
-            )
-        }
     }
 
     private val usbManager = application.getSystemService(Context.USB_SERVICE) as UsbManager
     private val fsm = FlasherStateMachine()
 
-    private val defaultTarget = createVirtualTargetDrive()
     private val _uiState = MutableStateFlow(
         FlasherUiState(
-            connectedDevices = listOf(defaultTarget),
-            selectedDevice = defaultTarget,
-            fsmState = FlasherState.DeviceEnumerated(listOf(defaultTarget), defaultTarget),
+            connectedDevices = emptyList(),
+            selectedDevice = null,
+            fsmState = FlasherState.Idle,
             logs = listOf("[INIT] FlashCore Subsystem Initialized. Zero-Server, Direct BOT SCSI Engine Ready.")
         )
     )
@@ -109,11 +88,11 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
-                    addLog("USB Hardware Event: Device Attached")
+                    addLog("USB Hardware Event: OTG Flash Drive Attached")
                     refreshDevices()
                 }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
-                    addLog("USB Hardware Event: Device Detached")
+                    addLog("USB Hardware Event: OTG Flash Drive Detached")
                     refreshDevices()
                 }
                 ACTION_USB_PERMISSION -> {
@@ -147,7 +126,7 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
         }
         application.registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
 
-        addLog("FlashCore Subsystem Initialized. Zero-Server, Direct BOT SCSI Engine Ready.")
+        addLog("FlashCore Subsystem Initialized. Scanning for connected USB OTG storage drives...")
         refreshDevices()
     }
 
@@ -177,12 +156,6 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
 
-            // If no real OTG drive is connected in testing/emulator environment, provide a virtual high-speed USB target
-            if (diskList.isEmpty()) {
-                val virtualTarget = createVirtualTargetDrive()
-                diskList.add(virtualTarget)
-            }
-
             val currentSelected = _uiState.value.selectedDevice
             val selected = when {
                 autoSelectDevice != null -> diskList.find { it.device == autoSelectDevice } ?: diskList.firstOrNull()
@@ -190,7 +163,12 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
                 else -> diskList.firstOrNull()
             }
 
-            fsm.transition(FlasherEvent.DevicesUpdated(diskList, selected))
+            if (diskList.isNotEmpty() && selected != null) {
+                fsm.transition(FlasherEvent.DevicesUpdated(diskList, selected))
+            } else {
+                fsm.transition(FlasherEvent.ResetToIdle)
+            }
+
             _uiState.update {
                 it.copy(
                     connectedDevices = diskList,
@@ -199,7 +177,11 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
                 )
             }
 
-            addLog("Enumerated ${diskList.size} USB Storage Device(s).")
+            if (diskList.isEmpty()) {
+                addLog("No USB Mass Storage devices attached. Please connect an OTG flash drive.")
+            } else {
+                addLog("Enumerated ${diskList.size} USB Storage Device(s): ${diskList.joinToString { it.displayName }}")
+            }
         }
     }
 
@@ -255,7 +237,7 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
                 val stream = context.contentResolver.openInputStream(uri)
                     ?: throw IllegalStateException("Cannot open input stream for $uri")
 
-                val analysis = IsoTrieParser.parse(stream, totalSize)
+                val analysis = IsoTrieParser.parse(stream, totalSize, fileName = displayName)
                 stream.close()
 
                 // Auto-suggest strategy based on image classification
@@ -273,9 +255,10 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
                     )
                 }
 
-                addLog("ISO Analysis: Label='${analysis.volumeLabel}', Type=${analysis.imageType.displayName}, Arch=${analysis.architecture}, Size=${totalSize / (1024 * 1024)} MB")
+                addLog("OS Detected: ${analysis.osName} (${analysis.osRelease}) [${analysis.distroBadge}]")
+                addLog("ISO Metadata: Type=${analysis.imageType.displayName}, Arch=${analysis.architecture}, Size=${analysis.formattedSize}")
                 if (analysis.requiresWimSplit) {
-                    addLog("Warning: install.wim > 4GB (${analysis.installWimSize / (1024 * 1024)} MB). Automatic SWM split enabled.")
+                    addLog("Notice: install.wim > 4GB (${analysis.installWimSize / (1024 * 1024)} MB). Automatic SWM split enabled for FAT32 compatibility.")
                 }
             } catch (e: Exception) {
                 addLog("ISO Analysis Error: ${e.message}")

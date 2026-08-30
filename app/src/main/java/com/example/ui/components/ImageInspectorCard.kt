@@ -157,7 +157,7 @@ fun ImageInspectorCard(
                         CircularProgressIndicator(color = ElegantBlueLight, modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(10.dp))
                         Text(
-                            text = "Inspecting ISO structures & directory trie...",
+                            text = "Analyzing ISO structure & parsing Trie...",
                             color = ElegantBlueAccent,
                             fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace
@@ -172,7 +172,7 @@ fun ImageInspectorCard(
                         .clip(RoundedCornerShape(14.dp))
                         .background(ElegantDarkCardInset)
                         .border(1.dp, ElegantDarkBorder, RoundedCornerShape(14.dp))
-                        .padding(12.dp)
+                        .padding(14.dp)
                 ) {
                     Column {
                         Row(
@@ -180,56 +180,93 @@ fun ImageInspectorCard(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = "Volume: ${analysis.volumeLabel}",
-                                color = TextPrimary,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium,
-                                fontFamily = FontFamily.Monospace
-                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = analysis.osName,
+                                    color = TextHeadings,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "${analysis.osRelease} • ${analysis.architecture}",
+                                    color = TextSecondary,
+                                    fontSize = 11.sp
+                                )
+                            }
 
-                            // Tag
+                            // Distro Tag
                             Box(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(
-                                        when (analysis.imageType) {
-                                            IsoTrieParser.ImageType.WINDOWS_INSTALLER -> Color(0x262563EB)
-                                            IsoTrieParser.ImageType.VENTOY_BOOTABLE -> ElegantPurpleBg
+                                        when (analysis.distroBadge) {
+                                            "WINDOWS" -> Color(0x262563EB)
+                                            "VENTOY" -> ElegantPurpleBg
+                                            "KALI" -> Color(0x26EF4444)
+                                            "ARCH" -> Color(0x2606B6D4)
+                                            "UBUNTU" -> Color(0x26F97316)
+                                            "DEBIAN" -> Color(0x26E11D48)
+                                            "FEDORA" -> Color(0x263B82F6)
                                             else -> ElegantEmeraldBg
                                         }
                                     )
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    .padding(horizontal = 8.dp, vertical = 3.dp)
                             ) {
                                 Text(
-                                    text = analysis.imageType.displayName.uppercase(),
-                                    color = when (analysis.imageType) {
-                                        IsoTrieParser.ImageType.WINDOWS_INSTALLER -> ElegantBlueAccent
-                                        IsoTrieParser.ImageType.VENTOY_BOOTABLE -> ElegantPurple
+                                    text = analysis.distroBadge,
+                                    color = when (analysis.distroBadge) {
+                                        "WINDOWS" -> ElegantBlueAccent
+                                        "VENTOY" -> ElegantPurple
+                                        "KALI" -> Color(0xFFF87171)
+                                        "ARCH" -> Color(0xFF38BDF8)
+                                        "UBUNTU" -> Color(0xFFFB923C)
+                                        "DEBIAN" -> Color(0xFFFB7185)
+                                        "FEDORA" -> Color(0xFF60A5FA)
                                         else -> ElegantEmeraldLight
                                     },
-                                    fontSize = 9.sp,
+                                    fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold,
                                     fontFamily = FontFamily.Monospace
                                 )
                             }
                         }
 
-                        Spacer(Modifier.height(6.dp))
+                        Spacer(Modifier.height(10.dp))
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
+                                text = "Vol: ${analysis.volumeLabel}",
+                                color = TextPrimary,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1
+                            )
+                            Text(
                                 text = "Size: ${analysis.formattedSize}",
                                 color = TextSecondary,
                                 fontSize = 11.sp,
                                 fontFamily = FontFamily.Monospace
                             )
+                        }
+
+                        Spacer(Modifier.height(4.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
                             Text(
-                                text = "Boot: ${if (analysis.hasEfiBoot) "UEFI x64" else "BIOS MBR"}",
-                                color = TextSecondary,
+                                text = "Engine: ${analysis.imageType.displayName}",
+                                color = ElegantBlueAccent,
+                                fontSize = 11.sp,
+                                maxLines = 1
+                            )
+                            Text(
+                                text = "Boot: ${if (analysis.hasEfiBoot) "UEFI" else "BIOS"}",
+                                color = TextMuted,
                                 fontSize = 11.sp,
                                 fontFamily = FontFamily.Monospace
                             )
@@ -257,38 +294,37 @@ fun ImageInspectorCard(
                     }
                 }
             } else {
-                // Preset samples
-                Column {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(ElegantDarkCardInset)
-                                .border(1.dp, ElegantDarkBorder, RoundedCornerShape(12.dp))
-                                .clickable { onLoadSample("ubuntu") }
-                                .padding(12.dp)
-                                .testTag("sample_ubuntu_button"),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text("Ubuntu 24.04", fontSize = 11.sp, color = ElegantEmeraldLight, fontWeight = FontWeight.SemiBold)
-                        }
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(ElegantDarkCardInset)
-                                .border(1.dp, ElegantDarkBorder, RoundedCornerShape(12.dp))
-                                .clickable { onLoadSample("windows") }
-                                .padding(12.dp)
-                                .testTag("sample_windows_button"),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text("Windows 11 UEFI", fontSize = 11.sp, color = ElegantBlueAccent, fontWeight = FontWeight.SemiBold)
-                        }
+                // Empty state prompting user to pick an ISO
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(ElegantDarkCardInset)
+                        .border(1.dp, ElegantDarkBorder, RoundedCornerShape(14.dp))
+                        .clickable { onPickImage() }
+                        .padding(16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = Icons.Default.FileOpen,
+                            contentDescription = "Choose ISO",
+                            tint = ElegantBlueAccent,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "Tap to Select OS ISO / Disk Image",
+                            color = TextHeadings,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = "Auto-detects Ubuntu, Kali, Arch, Debian, Fedora, Windows 11/10 UEFI, etc.",
+                            color = TextSecondary,
+                            fontSize = 11.sp
+                        )
                     }
                 }
             }

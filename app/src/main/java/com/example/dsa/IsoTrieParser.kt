@@ -46,6 +46,9 @@ class IsoTrieParser {
         val totalSizeBytes: Long,
         val sectorSize: Int,
         val imageType: ImageType,
+        val osName: String = "Linux / Bootable OS",
+        val osRelease: String = "Universal",
+        val distroBadge: String = "LINUX",
         val isBootable: Boolean,
         val hasEfiBoot: Boolean,
         val efiBootPath: String?,
@@ -108,9 +111,9 @@ class IsoTrieParser {
         private const val FAT32_LIMIT_BYTES = 4294967295L // 4 GB - 1 byte
 
         /**
-         * Analyzes an input stream (ISO or IMG) and constructs the Trie index.
+         * Analyzes an input stream (ISO or IMG) and constructs the Trie index and detects OS distribution.
          */
-        fun parse(stream: InputStream, totalSizeBytes: Long): AnalysisResult {
+        fun parse(stream: InputStream, totalSizeBytes: Long, fileName: String = ""): AnalysisResult {
             val buffer = ByteArray(SECTOR_SIZE)
             var volumeLabel = "UNKNOWN"
             var systemId = "GENERIC"
@@ -189,38 +192,174 @@ class IsoTrieParser {
             val requiresWimSplit = installWimSize > FAT32_LIMIT_BYTES
 
             // Detect Architecture
+            val combinedName = (fileName + " " + volumeLabel).lowercase()
             val architecture = when {
-                parser.contains("efi/boot/bootaa64.efi") || volumeLabel.contains("arm64", ignoreCase = true) || volumeLabel.contains("aarch64", ignoreCase = true) -> "AArch64 (ARM64)"
-                parser.contains("efi/boot/bootx64.efi") || volumeLabel.contains("x86_64", ignoreCase = true) || volumeLabel.contains("amd64", ignoreCase = true) -> "x86_64 (64-bit)"
-                parser.contains("efi/boot/bootia32.efi") || volumeLabel.contains("i386", ignoreCase = true) -> "x86 (32-bit)"
+                parser.contains("efi/boot/bootaa64.efi") || combinedName.contains("arm64") || combinedName.contains("aarch64") -> "AArch64 (ARM64)"
+                parser.contains("efi/boot/bootx64.efi") || combinedName.contains("x86_64") || combinedName.contains("amd64") || combinedName.contains("x64") -> "x86_64 (64-bit)"
+                parser.contains("efi/boot/bootia32.efi") || combinedName.contains("i386") || combinedName.contains("x86") || combinedName.contains("i686") -> "x86 (32-bit)"
                 else -> "Universal / BIOS"
             }
 
-            // Classify OS / Image Type
+            // Deep Classification of Operating System & Distribution
+            val fnLower = fileName.lowercase()
             val labelLower = volumeLabel.lowercase()
-            val imageType = when {
-                hasInstallWim || parser.contains("boot/bcd") || parser.contains("sources/boot.wim") -> ImageType.WINDOWS_INSTALLER
-                labelLower.contains("ventoy") || parser.contains("ventoy/ventoy.json") -> ImageType.VENTOY_BOOTABLE
-                labelLower.contains("proxmox") || labelLower.contains("pve") -> ImageType.PROXMOX_HYPERVISOR
-                labelLower.contains("clonezilla") -> ImageType.CLONEZILLA
-                labelLower.contains("freebsd") || labelLower.contains("openbsd") -> ImageType.FREEBSD_BSD
-                labelLower.contains("ubuntu") || labelLower.contains("debian") || labelLower.contains("arch") ||
-                        labelLower.contains("fedora") || labelLower.contains("kali") || labelLower.contains("manjaro") ||
-                        labelLower.contains("mint") || labelLower.contains("pop-os") || labelLower.contains("nixos") ||
-                        labelLower.contains("almalinux") || labelLower.contains("rocky") || labelLower.contains("centos") -> ImageType.LINUX_HYBRID
-                isIso9660 -> ImageType.GENERIC_BOOTABLE_ISO
-                else -> ImageType.RAW_DISK_IMAGE
+            val sysLower = systemId.lowercase()
+            val allTarget = "$fnLower $labelLower $sysLower"
+
+            val (osName, osRelease, distroBadge, imageType) = when {
+                // Windows detection (11, 10, Server, etc.)
+                hasInstallWim || parser.contains("boot/bcd") || parser.contains("sources/boot.wim") ||
+                        allTarget.contains("win11") || allTarget.contains("windows 11") || allTarget.contains("windows11") -> {
+                    val isWin11 = allTarget.contains("win11") || allTarget.contains("windows 11") || allTarget.contains("windows11") || allTarget.contains("23h2") || allTarget.contains("24h2") || allTarget.contains("22h2")
+                    val isWin10 = allTarget.contains("win10") || allTarget.contains("windows 10") || allTarget.contains("windows10") || allTarget.contains("21h2") || allTarget.contains("1909")
+                    val isServer = allTarget.contains("server")
+                    val ver = when {
+                        isWin11 -> "Windows 11"
+                        isWin10 -> "Windows 10"
+                        isServer -> "Windows Server"
+                        allTarget.contains("win8") || allTarget.contains("win 8") -> "Windows 8.1"
+                        allTarget.contains("win7") || allTarget.contains("win 7") -> "Windows 7"
+                        else -> "Windows Installer"
+                    }
+                    val sub = if (hasInstallWim) {
+                        if (requiresWimSplit) "UEFI Installer (install.wim >4GB auto-split)" else "UEFI / BIOS Installer"
+                    } else "Installer"
+                    Quad(ver, sub, "WINDOWS", ImageType.WINDOWS_INSTALLER)
+                }
+
+                // Kali Linux
+                allTarget.contains("kali") || parser.contains("live/vmlinuz") && allTarget.contains("kali") -> {
+                    val verRegex = Regex("""kali.*?(\d{4}\.\d+)""").find(allTarget)
+                    val ver = verRegex?.groupValues?.getOrNull(1) ?: "Rolling"
+                    Quad("Kali Linux", "$ver (Penetration Testing)", "KALI", ImageType.LINUX_HYBRID)
+                }
+
+                // Arch Linux
+                allTarget.contains("archlinux") || allTarget.contains("arch_") || (allTarget.contains("arch") && !allTarget.contains("search")) || parser.contains("arch/boot") -> {
+                    val verRegex = Regex("""(\d{4}\.\d{2}\.\d{2})""").find(allTarget)
+                    val ver = verRegex?.groupValues?.getOrNull(1) ?: "Rolling Release"
+                    Quad("Arch Linux", ver, "ARCH", ImageType.LINUX_HYBRID)
+                }
+
+                // Ubuntu
+                allTarget.contains("ubuntu") || parser.contains("casper/vmlinuz") || parser.contains("casper/filesystem.squashfs") -> {
+                    val verRegex = Regex("""(\d{2}\.\d{2}(\.\d+)?)""").find(allTarget)
+                    val ver = verRegex?.groupValues?.getOrNull(1) ?: "24.04 LTS"
+                    val flavor = if (allTarget.contains("server")) "Server" else "Desktop"
+                    Quad("Ubuntu Linux", "$ver $flavor", "UBUNTU", ImageType.LINUX_HYBRID)
+                }
+
+                // Debian
+                allTarget.contains("debian") -> {
+                    val verRegex = Regex("""debian.*?(\d{2}\.\d+(\.\d+)?)""").find(allTarget)
+                    val ver = verRegex?.groupValues?.getOrNull(1) ?: "12 Bookworm"
+                    val flavor = if (allTarget.contains("netinst")) "Netinst" else "Live"
+                    Quad("Debian GNU/Linux", "$ver $flavor", "DEBIAN", ImageType.LINUX_HYBRID)
+                }
+
+                // Fedora
+                allTarget.contains("fedora") -> {
+                    val verRegex = Regex("""fedora.*?(\d{2})""").find(allTarget)
+                    val ver = verRegex?.groupValues?.getOrNull(1) ?: "40"
+                    val flavor = if (allTarget.contains("server")) "Server" else "Workstation Live"
+                    Quad("Fedora Linux", "$ver $flavor", "FEDORA", ImageType.LINUX_HYBRID)
+                }
+
+                // Linux Mint
+                allTarget.contains("mint") || allTarget.contains("linuxmint") -> {
+                    val verRegex = Regex("""mint.*?(\d{2}(\.\d+)?)""").find(allTarget)
+                    val ver = verRegex?.groupValues?.getOrNull(1) ?: "22"
+                    Quad("Linux Mint", "$ver Cinnamon/MATE", "MINT", ImageType.LINUX_HYBRID)
+                }
+
+                // Manjaro
+                allTarget.contains("manjaro") -> {
+                    val verRegex = Regex("""manjaro.*?(\d{2}\.\d+)""").find(allTarget)
+                    val ver = verRegex?.groupValues?.getOrNull(1) ?: "Rolling"
+                    Quad("Manjaro Linux", ver, "MANJARO", ImageType.LINUX_HYBRID)
+                }
+
+                // Pop!_OS
+                allTarget.contains("pop") && (allTarget.contains("os") || allTarget.contains("pop_os") || allTarget.contains("pop-os")) -> {
+                    Quad("Pop!_OS", "System76 Live", "POP_OS", ImageType.LINUX_HYBRID)
+                }
+
+                // Parrot Security
+                allTarget.contains("parrot") -> {
+                    Quad("Parrot Security OS", "Security / Home Edition", "PARROT", ImageType.LINUX_HYBRID)
+                }
+
+                // Tails
+                allTarget.contains("tails") -> {
+                    Quad("Tails OS", "The Amnesic Incognito Live", "TAILS", ImageType.LINUX_HYBRID)
+                }
+
+                // Enterprise Linux (Alma, Rocky, RHEL, CentOS)
+                allTarget.contains("alma") || allTarget.contains("almalinux") -> Quad("AlmaLinux OS", "Enterprise Linux", "ALMA", ImageType.LINUX_HYBRID)
+                allTarget.contains("rocky") || allTarget.contains("rockylinux") -> Quad("Rocky Linux", "Enterprise Linux", "ROCKY", ImageType.LINUX_HYBRID)
+                allTarget.contains("centos") -> Quad("CentOS Stream", "Red Hat Community", "CENTOS", ImageType.LINUX_HYBRID)
+                allTarget.contains("rhel") -> Quad("Red Hat Enterprise Linux", "RHEL", "RHEL", ImageType.LINUX_HYBRID)
+
+                // openSUSE
+                allTarget.contains("suse") || allTarget.contains("opensuse") || allTarget.contains("tumbleweed") || allTarget.contains("leap") -> {
+                    val ver = if (allTarget.contains("tumbleweed")) "Tumbleweed Rolling" else "Leap Enterprise"
+                    Quad("openSUSE Linux", ver, "SUSE", ImageType.LINUX_HYBRID)
+                }
+
+                // Alpine / Void / NixOS
+                allTarget.contains("alpine") -> Quad("Alpine Linux", "Lightweight / Minimal", "ALPINE", ImageType.LINUX_HYBRID)
+                allTarget.contains("void") -> Quad("Void Linux", "xbps-src Rolling", "VOID", ImageType.LINUX_HYBRID)
+                allTarget.contains("nixos") -> Quad("NixOS", "Declarative Linux", "NIXOS", ImageType.LINUX_HYBRID)
+
+                // Ventoy Multi-Boot
+                allTarget.contains("ventoy") || parser.contains("ventoy/ventoy.json") -> {
+                    Quad("Ventoy Multi-Boot", "Modular Bootloader", "VENTOY", ImageType.VENTOY_BOOTABLE)
+                }
+
+                // Proxmox / Hypervisor
+                allTarget.contains("proxmox") || allTarget.contains("pve") -> {
+                    Quad("Proxmox VE", "Virtual Environment", "PROXMOX", ImageType.PROXMOX_HYPERVISOR)
+                }
+
+                // Clonezilla / Rescue
+                allTarget.contains("clonezilla") || allTarget.contains("gparted") || allTarget.contains("systemrescue") -> {
+                    Quad("Rescue / Diagnostic Tool", "Disk Utility Live", "RESCUE", ImageType.CLONEZILLA)
+                }
+
+                // FreeBSD / BSD
+                allTarget.contains("freebsd") || allTarget.contains("openbsd") || allTarget.contains("netbsd") -> {
+                    Quad("BSD Unix", "FreeBSD / OpenBSD", "BSD", ImageType.FREEBSD_BSD)
+                }
+
+                // ChromeOS Flex
+                allTarget.contains("chromeos") || allTarget.contains("chromium") -> {
+                    Quad("ChromeOS Flex", "Cloud-First OS", "CHROMEOS", ImageType.LINUX_HYBRID)
+                }
+
+                // Generic ISO or Raw Image
+                fnLower.endsWith(".img") || fnLower.endsWith(".bin") || fnLower.endsWith(".raw") -> {
+                    Quad("Raw Disk Image", "Direct Sector Stream", "RAW_IMG", ImageType.RAW_DISK_IMAGE)
+                }
+                isIso9660 -> {
+                    Quad(if (volumeLabel != "UNKNOWN") volumeLabel else "Generic Bootable ISO", "ISO9660 / UDF Hybrid", "ISO9660", ImageType.GENERIC_BOOTABLE_ISO)
+                }
+                else -> {
+                    Quad(if (fileName.isNotBlank()) fileName.substringBeforeLast('.') else "Bootable Storage Image", "Binary Image", "RAW_IMG", ImageType.RAW_DISK_IMAGE)
+                }
             }
 
             return AnalysisResult(
-                volumeLabel = if (volumeLabel.isNotBlank()) volumeLabel else "BOOT_MEDIA",
+                volumeLabel = if (volumeLabel.isNotBlank() && volumeLabel != "UNKNOWN") volumeLabel else (if (fileName.isNotBlank()) fileName.substringBeforeLast('.') else "BOOT_MEDIA"),
                 systemId = systemId,
                 publisherId = publisherId,
                 totalSizeBytes = totalSizeBytes,
                 sectorSize = SECTOR_SIZE,
                 imageType = imageType,
-                isBootable = hasElTorito || matchedEfiPath != null || hasInstallWim,
-                hasEfiBoot = matchedEfiPath != null,
+                osName = osName,
+                osRelease = osRelease,
+                distroBadge = distroBadge,
+                isBootable = hasElTorito || matchedEfiPath != null || hasInstallWim || imageType == ImageType.LINUX_HYBRID,
+                hasEfiBoot = matchedEfiPath != null || architecture.contains("64"),
                 efiBootPath = matchedEfiPath,
                 hasInstallWim = hasInstallWim,
                 installWimSize = installWimSize,
@@ -230,6 +369,8 @@ class IsoTrieParser {
                 allEntries = parser.entriesList
             )
         }
+
+        private data class Quad<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
 
         private fun parseRootDirectory(buffer: ByteArray, offset: Int, parser: IsoTrieParser) {
             if (offset + 33 > buffer.size) return
