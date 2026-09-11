@@ -19,12 +19,25 @@ import kotlinx.coroutines.ensureActive
  * Capacity and Geometry Semantics:
  * 1. Explicit Logical Capacity: When constructed with an explicit [totalSectors] count,
  *    the device geometry is fixed to [totalSectors] sectors of [sectorSizeBytes] each.
- *    The backing file may be preallocated (physical length == totalBytes) or sparse
- *    (physical length on disk <= totalBytes; unwritten regions return deterministic zeroes).
- * 2. Existing Image Auto-Capacity: When opened via [openExisting] or secondary constructor
- *    without [totalSectors], the sector count is derived from the backing file's physical
- *    byte length (`imageFile.length() / sectorSizeBytes`). The file must already exist, be
- *    non-empty, and its size must be an exact integer multiple of [sectorSizeBytes].
+ *    - New files are created if they do not exist.
+ *    - Existing files are validated: an existing file whose length exceeds the requested
+ *      capacity is rejected to prevent silent data destruction/truncation. Existing files
+ *      smaller than requested capacity are treated as valid sparse disk images.
+ *    - Setting [preallocate] to true extends the file length to the full logical capacity
+ *      via [RandomAccessFile.setLength]. Note that on sparse-capable host filesystems, physical
+ *      allocation of disk blocks remains on-demand by the OS filesystem driver.
+ * 2. Existing Image Auto-Capacity: When opened via [openExisting] or secondary constructors
+ *    without [totalSectors], the sector count is derived directly from the backing file's
+ *    physical byte length (`imageFile.length() / sectorSizeBytes`). The file must already exist,
+ *    be a regular non-empty file, and its size must be an exact integer multiple of [sectorSizeBytes].
+ *
+ * Concurrency & Lifecycle:
+ * - All file I/O operations (read, write, direct-buffer write, flush) and [close] synchronize
+ *   on a dedicated internal lock.
+ * - Calling [close] transitions the device atomically to disconnected state and releases underlying
+ *   file channels and handles. In-flight and subsequent operations fail deterministically with
+ *   [DeviceDisconnectedException].
+ * - [close] is safely idempotent.
  */
 class FileBackedBlockDevice @JvmOverloads constructor(
     val imageFile: File,
@@ -33,6 +46,7 @@ class FileBackedBlockDevice @JvmOverloads constructor(
     preallocate: Boolean = false
 ) : BlockDevice {
 
+    private val lock = Any()
     private val raf: RandomAccessFile
     private val channel: FileChannel
 
@@ -45,16 +59,29 @@ class FileBackedBlockDevice @JvmOverloads constructor(
 
     init {
         validateGeometry(totalSectors, sectorSizeBytes)
+        validateBackingFile(imageFile, totalSectors, sectorSizeBytes)
+
         if (!imageFile.exists()) {
             imageFile.parentFile?.mkdirs()
             imageFile.createNewFile()
         }
-        raf = RandomAccessFile(imageFile, "rw")
-        channel = raf.channel
 
-        val requiredBytes = totalSectors * sectorSizeBytes.toLong()
-        if (preallocate && raf.length() < requiredBytes) {
-            raf.setLength(requiredBytes)
+        var openedRaf: RandomAccessFile? = null
+        var openedChannel: FileChannel? = null
+        try {
+            openedRaf = RandomAccessFile(imageFile, "rw")
+            openedChannel = openedRaf.channel
+
+            val requiredBytes = totalSectors * sectorSizeBytes.toLong()
+            if (preallocate && openedRaf.length() < requiredBytes) {
+                openedRaf.setLength(requiredBytes)
+            }
+            this.raf = openedRaf
+            this.channel = openedChannel
+        } catch (t: Throwable) {
+            try { openedChannel?.close() } catch (_: Exception) {}
+            try { openedRaf?.close() } catch (_: Exception) {}
+            throw t
         }
     }
 
@@ -92,7 +119,8 @@ class FileBackedBlockDevice @JvmOverloads constructor(
         validateBufferBounds(dest.size, offset, totalBytes)
 
         val fileOffset = lba * sectorSizeBytes.toLong()
-        synchronized(raf) {
+        synchronized(lock) {
+            checkConnected()
             val fileLength = raf.length()
             if (fileOffset >= fileLength) {
                 // Reading beyond current physical file length returns deterministic zeroes
@@ -126,13 +154,20 @@ class FileBackedBlockDevice @JvmOverloads constructor(
         validateBufferBounds(src.size, offset, totalBytes)
 
         val fileOffset = lba * sectorSizeBytes.toLong()
-        synchronized(raf) {
+        synchronized(lock) {
+            checkConnected()
             raf.seek(fileOffset)
             raf.write(src, offset, totalBytes)
         }
         return true
     }
 
+    /**
+     * Writes sectors from [directBuffer] starting at [offset] for [length] bytes.
+     *
+     * While optimized for direct ByteBuffers, standard heap ByteBuffers are also accepted.
+     * The caller's buffer position and limit are preserved.
+     */
     override suspend fun writeDirectBuffer(
         lba: Long,
         blockCount: Int,
@@ -159,7 +194,7 @@ class FileBackedBlockDevice @JvmOverloads constructor(
         val bufferLimit = directBuffer.limit()
         if (offset > bufferLimit || offset.toLong() + length.toLong() > bufferLimit.toLong()) {
             throw IndexOutOfBoundsException(
-                "Requested range [$offset..${offset.toLong() + length.toLong()}] exceeds direct buffer limit ($bufferLimit)"
+                "Requested range [$offset..${offset.toLong() + length.toLong()}] exceeds buffer limit ($bufferLimit)"
             )
         }
 
@@ -168,12 +203,26 @@ class FileBackedBlockDevice @JvmOverloads constructor(
         slice.position(offset)
         slice.limit(offset + length)
 
-        synchronized(raf) {
+        synchronized(lock) {
+            checkConnected()
             channel.position(fileOffset)
+            var zeroProgressAttempts = 0
+            val maxZeroProgressRetries = 10
             while (slice.hasRemaining()) {
                 val written = channel.write(slice)
                 if (written < 0) {
-                    throw IOException("Unexpected EOF while writing direct buffer to file channel")
+                    throw IOException("Unexpected EOF while writing buffer to file channel at LBA $lba")
+                }
+                if (written == 0) {
+                    zeroProgressAttempts++
+                    if (zeroProgressAttempts > maxZeroProgressRetries) {
+                        throw IOException(
+                            "Zero-progress write detected: channel.write made no progress after $maxZeroProgressRetries attempts at LBA $lba"
+                        )
+                    }
+                    Thread.yield()
+                } else {
+                    zeroProgressAttempts = 0
                 }
             }
         }
@@ -183,7 +232,8 @@ class FileBackedBlockDevice @JvmOverloads constructor(
     override suspend fun flush(): Boolean {
         currentCoroutineContext().ensureActive()
         checkConnected()
-        synchronized(raf) {
+        synchronized(lock) {
+            checkConnected()
             channel.force(true)
         }
         return true
@@ -230,15 +280,18 @@ class FileBackedBlockDevice @JvmOverloads constructor(
     }
 
     override fun close() {
-        isConnected = false
-        try {
-            if (channel.isOpen) {
-                channel.close()
-            }
-        } catch (_: Exception) {}
-        try {
-            raf.close()
-        } catch (_: Exception) {}
+        synchronized(lock) {
+            if (!isConnected) return
+            isConnected = false
+            try {
+                if (channel.isOpen) {
+                    channel.close()
+                }
+            } catch (_: Exception) {}
+            try {
+                raf.close()
+            } catch (_: Exception) {}
+        }
     }
 
     companion object {
@@ -255,6 +308,26 @@ class FileBackedBlockDevice @JvmOverloads constructor(
                 throw IllegalArgumentException(
                     "Total capacity overflows Long: totalSectors=$totalSectors, sectorSizeBytes=$sectorSizeBytes"
                 )
+            }
+        }
+
+        private fun validateBackingFile(imageFile: File, totalSectors: Long, sectorSizeBytes: Int) {
+            if (imageFile.exists()) {
+                if (!imageFile.isFile) {
+                    throw IllegalArgumentException("Path is not a regular file: ${imageFile.absolutePath}")
+                }
+                val fileLength = imageFile.length()
+                if (fileLength % sectorSizeBytes.toLong() != 0L) {
+                    throw IllegalArgumentException(
+                        "Existing backing file size ($fileLength bytes) is not an exact multiple of sector size ($sectorSizeBytes bytes)"
+                    )
+                }
+                val maxAllowedBytes = totalSectors * sectorSizeBytes.toLong()
+                if (fileLength > maxAllowedBytes) {
+                    throw IllegalArgumentException(
+                        "Backing file size ($fileLength bytes) exceeds requested logical capacity ($totalSectors sectors * $sectorSizeBytes bytes = $maxAllowedBytes bytes). Destructive truncation is not permitted."
+                    )
+                }
             }
         }
 

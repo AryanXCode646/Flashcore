@@ -76,7 +76,7 @@ The core architecture of FlashCore enforces strict separation of concerns, ensur
 Flashing bootable operating systems over USB OTG carries inherent risk: corrupted sectors or miscalculated partition boundaries produce unbootable media or damage file structures.
 
 FlashCore adheres to a fundamental principle:
-> **"Evidence over claims."** An implementation backed by 101 automated tests on abstract block devices and honest documentation of physical hardware limits is far more defensible than marketing unvalidated features as "production-grade."
+> **"Evidence over claims."** An implementation backed by 107 automated tests on abstract block devices and honest documentation of physical hardware limits is far more defensible than marketing unvalidated features as "production-grade."
 
 Every layer in FlashCore is designed to be **isolated, mockable, and verifiable offline** without requiring physical Android devices or USB drives.
 
@@ -90,7 +90,7 @@ To maintain engineering transparency, the architectural reality of the repositor
 | :--- | :--- | :--- |
 | **Gradle Modules** | Single monolithic `:app` module containing all layers | Multi-module separation (`:core`, `:flashers`, `:app`) |
 | **Package Namespace** | `com.ashishsinghbora.flashcore.*` across all source packages | Multi-module package organization |
-| **Testing Scope** | 101 automated software tests on `BlockDevice` doubles | Automated CI + physical USB controller test matrix |
+| **Testing Scope** | 107 automated software tests on `BlockDevice` doubles | Automated CI + physical USB controller test matrix |
 | **USB Memory Pipeline** | Direct-buffer circular ring buffer with heap staging copy | Direct ring buffer (true zero-copy is not possible via public Android APIs; requires staging copy) |
 | **Hardware Status** | Software tested; hardware validation pending | Physical qualification across OEM and controller matrix |
 

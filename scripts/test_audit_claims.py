@@ -198,8 +198,8 @@ class TestActualRepositoryCleanliness(unittest.TestCase):
             details["source_audit_status"], "PASS",
             f"Repository source audit failed with violations: {details['violations']}"
         )
-        self.assertEqual(details["inventory"]["total"], 102)
-        self.assertEqual(details["inventory"]["unit"], 101)
+        self.assertEqual(details["inventory"]["total"], 108)
+        self.assertEqual(details["inventory"]["unit"], 107)
         self.assertEqual(details["inventory"]["instrumentation"], 1)
 
 

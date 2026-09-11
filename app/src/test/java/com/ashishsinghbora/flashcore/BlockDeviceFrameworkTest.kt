@@ -8,7 +8,10 @@ import com.ashishsinghbora.flashcore.block.FileBackedBlockDevice
 import com.ashishsinghbora.flashcore.block.MemoryBlockDevice
 import com.ashishsinghbora.flashcore.partition.Fat32Formatter
 import com.ashishsinghbora.flashcore.partition.GptBuilder
+import com.ashishsinghbora.flashcore.partition.GptGuidHelper
 import com.ashishsinghbora.flashcore.partition.MbrBuilder
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -25,6 +28,11 @@ import java.io.InterruptedIOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
+import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.zip.CRC32
 
 /**
  * Comprehensive Test Framework for FlashCore Block Device Abstractions.
@@ -890,11 +898,9 @@ class BlockDeviceFrameworkTest {
 
             // Step 1: Initialize disk image, write protective MBR and GPT layout
             FileBackedBlockDevice(diskImageFile, totalSectors = totalSectors, sectorSizeBytes = 512, preallocate = true).use { dev ->
-                // Write protective MBR at LBA 0
                 val mbr = MbrBuilder.buildProtectiveMbr(totalSectors)
                 assertTrue(dev.write(0L, 1, mbr))
 
-                // Build GPT partition layout
                 val gptPart = GptBuilder.GptPartition(
                     typeGuid = GptBuilder.GUID_MICROSOFT_BASIC_DATA,
                     firstLba = 100L,
@@ -907,11 +913,9 @@ class BlockDeviceFrameworkTest {
                     sectorSizeBytes = 512
                 )
 
-                // Write Primary GPT Header (LBA 1) and Table (LBA 2..33)
                 assertTrue(dev.write(1L, 1, layout.primaryHeaderSector))
                 assertTrue(dev.write(2L, 32, layout.primaryPartitionTableBytes))
 
-                // Write Backup Table and Backup Header
                 val backupTableLba = totalSectors - 1L - 32L
                 assertTrue(dev.write(backupTableLba, 32, layout.backupPartitionTableBytes))
                 assertTrue(dev.write(totalSectors - 1L, 1, layout.backupHeaderSector))
@@ -919,30 +923,76 @@ class BlockDeviceFrameworkTest {
                 assertTrue(dev.flush())
             }
 
-            // Step 2: Reopen existing disk image via openExisting() and verify partition structures
+            // Step 2: Reopen existing disk image via openExisting() and perform independent structural validation
             FileBackedBlockDevice.openExisting(diskImageFile).use { dev ->
                 val cap = dev.capacity()
                 assertEquals(totalSectors, cap.totalSectors)
                 assertEquals(512, cap.sectorSizeBytes)
 
-                // Verify MBR at LBA 0
+                // 1. Independent Protective MBR verification
                 val mbrRead = ByteArray(512)
                 assertTrue(dev.read(0L, 1, mbrRead))
                 assertEquals(0x55.toByte(), mbrRead[510])
                 assertEquals(0xAA.toByte(), mbrRead[511])
-                assertEquals(0xEE.toByte(), mbrRead[446 + 4]) // GPT protective type
+                assertEquals(0x00.toByte(), mbrRead[446]) // Boot indicator: not active
+                assertEquals(0xEE.toByte(), mbrRead[446 + 4]) // Partition 1 type: GPT protective
+                val mbrBuf = ByteBuffer.wrap(mbrRead).order(ByteOrder.LITTLE_ENDIAN)
+                assertEquals(1, mbrBuf.getInt(446 + 8)) // Starting LBA == 1
 
-                // Verify Primary GPT Header at LBA 1
+                // 2. Independent Primary GPT Header verification (LBA 1)
                 val primaryHeader = ByteArray(512)
                 assertTrue(dev.read(1L, 1, primaryHeader))
                 val sig = String(primaryHeader, 0, 8, Charsets.US_ASCII)
                 assertEquals("EFI PART", sig)
 
                 val headerBuf = ByteBuffer.wrap(primaryHeader).order(ByteOrder.LITTLE_ENDIAN)
+                assertEquals(0x00010000, headerBuf.getInt(8)) // Revision 1.0
+                val headerSize = headerBuf.getInt(12)
+                assertEquals(92, headerSize) // Standard GPT header size is 92 bytes
+                val onDiskHeaderCrc = headerBuf.getInt(16)
                 assertEquals(1L, headerBuf.getLong(24)) // current LBA == 1
                 assertEquals(totalSectors - 1L, headerBuf.getLong(32)) // backup LBA
+                assertEquals(34L, headerBuf.getLong(40)) // first usable LBA
+                assertEquals(totalSectors - 34L, headerBuf.getLong(48)) // last usable LBA
+                assertEquals(2L, headerBuf.getLong(72)) // partition table LBA
+                val numEntries = headerBuf.getInt(80)
+                val entrySize = headerBuf.getInt(84)
+                assertEquals(128, numEntries)
+                assertEquals(128, entrySize)
+                val onDiskPartitionArrayCrc = headerBuf.getInt(88)
 
-                // Verify Backup GPT Header at last sector
+                // Verify Header CRC32 independently: compute CRC32 over 92 bytes with CRC field zeroed
+                val headerForCrc = primaryHeader.copyOfRange(0, headerSize)
+                headerForCrc[16] = 0; headerForCrc[17] = 0; headerForCrc[18] = 0; headerForCrc[19] = 0
+                val headerCrcCalc = CRC32()
+                headerCrcCalc.update(headerForCrc)
+                assertEquals(onDiskHeaderCrc, headerCrcCalc.value.toInt())
+
+                // 3. Independent Partition Table verification (LBA 2..33 = 32 sectors = 16384 bytes)
+                val partArrayBytes = ByteArray(numEntries * entrySize)
+                assertTrue(dev.read(2L, 32, partArrayBytes))
+                val partArrayCrcCalc = CRC32()
+                partArrayCrcCalc.update(partArrayBytes)
+                assertEquals(onDiskPartitionArrayCrc, partArrayCrcCalc.value.toInt())
+
+                // Parse Partition Entry 1 independently (first 128 bytes of partition array)
+                val partTypeGuid = GptGuidHelper.fromMixedEndianByteArray(partArrayBytes, 0)
+                assertEquals(GptGuidHelper.GUID_MICROSOFT_BASIC_DATA, partTypeGuid)
+
+                val entryBuf = ByteBuffer.wrap(partArrayBytes).order(ByteOrder.LITTLE_ENDIAN)
+                val partStartLba = entryBuf.getLong(32)
+                val partEndLba = entryBuf.getLong(40)
+                assertEquals(100L, partStartLba)
+                assertEquals(1900L, partEndLba)
+
+                val nameChars = CharArray(36)
+                for (i in 0 until 36) {
+                    nameChars[i] = entryBuf.getChar(56 + i * 2)
+                }
+                val partName = String(nameChars).trimEnd('\u0000')
+                assertEquals("TEST_PART", partName)
+
+                // 4. Independent Backup GPT Header verification (last sector)
                 val backupHeader = ByteArray(512)
                 assertTrue(dev.read(totalSectors - 1L, 1, backupHeader))
                 val backupSig = String(backupHeader, 0, 8, Charsets.US_ASCII)
@@ -951,8 +1001,195 @@ class BlockDeviceFrameworkTest {
                 val backupBuf = ByteBuffer.wrap(backupHeader).order(ByteOrder.LITTLE_ENDIAN)
                 assertEquals(totalSectors - 1L, backupBuf.getLong(24))
                 assertEquals(1L, backupBuf.getLong(32))
+                val onDiskBackupHeaderCrc = backupBuf.getInt(16)
+
+                val backupForCrc = backupHeader.copyOfRange(0, headerSize)
+                backupForCrc[16] = 0; backupForCrc[17] = 0; backupForCrc[18] = 0; backupForCrc[19] = 0
+                val backupCrcCalc = CRC32()
+                backupCrcCalc.update(backupForCrc)
+                assertEquals(onDiskBackupHeaderCrc, backupCrcCalc.value.toInt())
             }
         }
+    }
+
+    @Test
+    fun testConcurrentCloseDuringOperations() {
+        runBlocking(Dispatchers.Default) {
+            val diskImageFile = File(tempFolder.root, "concurrent_close.img")
+            val totalSectors = 4096L
+            val dev = FileBackedBlockDevice(diskImageFile, totalSectors = totalSectors, sectorSizeBytes = 512)
+
+            val opCount = 40
+            val latch = CountDownLatch(opCount / 2)
+            val successCount = AtomicInteger(0)
+            val disconnectCount = AtomicInteger(0)
+
+            val jobs = (0 until opCount).map { i ->
+                launch {
+                    val lba = (i * 10L) % 100L
+                    val buffer = ByteArray(512) { (i % 128).toByte() }
+                    try {
+                        if (i % 2 == 0) {
+                            latch.countDown()
+                            dev.write(lba, 1, buffer)
+                        } else {
+                            dev.read(lba, 1, buffer)
+                        }
+                        successCount.incrementAndGet()
+                    } catch (e: DeviceDisconnectedException) {
+                        disconnectCount.incrementAndGet()
+                    }
+                }
+            }
+
+            // Await half the operations to start, then trigger close
+            latch.await(2, TimeUnit.SECONDS)
+            dev.close()
+
+            jobs.forEach { it.join() }
+
+            assertFalse(dev.isConnected)
+            assertEquals(opCount, successCount.get() + disconnectCount.get())
+        }
+    }
+
+    @Test
+    fun testConcurrentMultipleReadsAndWrites() {
+        runBlocking(Dispatchers.Default) {
+            val diskImageFile = File(tempFolder.root, "concurrent_rw.img")
+            val totalSectors = 2048L
+            FileBackedBlockDevice(diskImageFile, totalSectors = totalSectors, sectorSizeBytes = 512).use { dev ->
+                val workerCount = 16
+                val jobs = (0 until workerCount).map { workerId ->
+                    launch {
+                        val sectorLba = workerId.toLong() * 10L
+                        val payload = ByteArray(512) { (workerId + 1).toByte() }
+                        assertTrue(dev.write(sectorLba, 1, payload))
+
+                        val readBack = ByteArray(512)
+                        assertTrue(dev.read(sectorLba, 1, readBack))
+                        assertArrayEquals(payload, readBack)
+                    }
+                }
+                jobs.forEach { it.join() }
+                assertTrue(dev.flush())
+            }
+        }
+    }
+
+    @Test
+    fun testConcurrentRepeatedClose() {
+        runBlocking(Dispatchers.Default) {
+            val diskImageFile = File(tempFolder.root, "concurrent_repeated_close.img")
+            val dev = FileBackedBlockDevice(diskImageFile, totalSectors = 100L, sectorSizeBytes = 512)
+            assertTrue(dev.isConnected)
+
+            val threads = 8
+            val jobs = (0 until threads).map {
+                launch {
+                    dev.close()
+                }
+            }
+            jobs.forEach { it.join() }
+
+            assertFalse(dev.isConnected)
+            assertThrows(DeviceDisconnectedException::class.java) {
+                runBlocking { dev.capacity() }
+            }
+        }
+    }
+
+    @Test
+    fun testFileBackedBlockDeviceDirectBufferContractAndHeapBuffer() {
+        runBlocking {
+            val diskImageFile = File(tempFolder.root, "buffer_contract.img")
+            val totalSectors = 100L
+
+            FileBackedBlockDevice(diskImageFile, totalSectors = totalSectors, sectorSizeBytes = 512).use { dev ->
+                // 1. Heap ByteBuffer support
+                val heapPayload = ByteArray(1024) { 0x42.toByte() }
+                val heapBuffer = ByteBuffer.wrap(heapPayload)
+                assertTrue(dev.writeDirectBuffer(lba = 0L, blockCount = 2, directBuffer = heapBuffer, offset = 0, length = 1024))
+                val readBack = ByteArray(1024)
+                assertTrue(dev.read(0L, 2, readBack))
+                assertArrayEquals(heapPayload, readBack)
+
+                // 2. Direct buffer with non-zero caller position
+                val direct = ByteBuffer.allocateDirect(2048)
+                val directPayload = ByteArray(512) { 0x33.toByte() }
+                direct.position(256)
+                direct.put(directPayload)
+                direct.position(128)
+                direct.limit(1024)
+
+                val originalPos = direct.position()
+                val originalLimit = direct.limit()
+
+                // Write at offset 256 for 512 bytes
+                assertTrue(dev.writeDirectBuffer(lba = 10L, blockCount = 1, directBuffer = direct, offset = 256, length = 512))
+
+                // Verify caller's buffer position and limit are completely preserved
+                assertEquals(originalPos, direct.position())
+                assertEquals(originalLimit, direct.limit())
+
+                val readBackDirect = ByteArray(512)
+                assertTrue(dev.read(10L, 1, readBackDirect))
+                assertArrayEquals(directPayload, readBackDirect)
+            }
+        }
+    }
+
+    @Test
+    fun testFileBackedBlockDeviceBackingFileGeometrySemantics() {
+        runBlocking {
+            val exactFile = File(tempFolder.root, "exact.img")
+            exactFile.writeBytes(ByteArray(2048)) // 4 sectors of 512B
+
+            // Exact match: succeeds
+            FileBackedBlockDevice(exactFile, totalSectors = 4L, sectorSizeBytes = 512).use { dev ->
+                assertEquals(4L, dev.totalSectors)
+                assertEquals(2048L, dev.capacity().totalBytes)
+            }
+
+            // Smaller existing file (valid sparse disk image): succeeds without truncating
+            val sparseFile = File(tempFolder.root, "sparse_small.img")
+            sparseFile.writeBytes(ByteArray(1024)) // 2 sectors on disk
+            FileBackedBlockDevice(sparseFile, totalSectors = 8L, sectorSizeBytes = 512, preallocate = false).use { dev ->
+                assertEquals(8L, dev.totalSectors)
+                assertEquals(4096L, dev.capacity().totalBytes)
+                assertEquals(1024L, sparseFile.length()) // physical size on disk remains 1024 bytes
+            }
+
+            // Larger existing file (8 sectors on disk, requested 4 sectors): rejected to avoid destructive truncation
+            val largerFile = File(tempFolder.root, "larger.img")
+            largerFile.writeBytes(ByteArray(4096))
+            val exLarger = assertThrows(IllegalArgumentException::class.java) {
+                FileBackedBlockDevice(largerFile, totalSectors = 4L, sectorSizeBytes = 512)
+            }
+            assertTrue(exLarger.message!!.contains("exceeds requested logical capacity"))
+
+            // Sector size mismatch: 1024-byte file is not divisible by 768
+            val mismatchFile = File(tempFolder.root, "mismatch.img")
+            mismatchFile.writeBytes(ByteArray(1024))
+            val exMismatch = assertThrows(IllegalArgumentException::class.java) {
+                FileBackedBlockDevice(mismatchFile, totalSectors = 2L, sectorSizeBytes = 768)
+            }
+            assertTrue(exMismatch.message!!.contains("not an exact multiple of sector size"))
+        }
+    }
+
+    @Test
+    fun testFileBackedBlockDeviceConstructorResourceCleanup() {
+        val testFile = File(tempFolder.root, "leak_test.img")
+        testFile.writeBytes(ByteArray(4096))
+
+        // Constructor fails due to backing file size exceeding requested capacity
+        assertThrows(IllegalArgumentException::class.java) {
+            FileBackedBlockDevice(testFile, totalSectors = 2L, sectorSizeBytes = 512)
+        }
+
+        // Verify file is not locked by an unclosed file channel / descriptor
+        assertTrue("Backing file should be immediately deletable without descriptor leaks", testFile.delete())
     }
 
     @Test

@@ -7,7 +7,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Android_8.0+-green.svg)](https://developer.android.com)
 [![JDK](https://img.shields.io/badge/JDK-21-red.svg)](https://adoptium.net)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.2+-purple.svg)](https://kotlinlang.org)
-[![Tests](https://img.shields.io/badge/Tests-102%20Automated%20Test%20Methods-blue.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-108%20Automated%20Test%20Methods-blue.svg)]()
 [![Hardware Validation](https://img.shields.io/badge/Hardware%20Validation-Pending-yellow.svg)](LIMITATIONS.md)
 [![Documentation](https://img.shields.io/badge/Docs-Architecture%20%7C%20Limitations-orange.svg)](ARCHITECTURE.md)
 
@@ -27,7 +27,7 @@ Our guiding principle is **engineering truthfulness**:
 ### Engineering Priorities & Baseline Reality
 1. 🥇 **Correctness:** Bit-for-bit exactness in sector writing and verification logic.
 2. 🥈 **Safety:** Hardened disconnect handling (`ACTION_USB_DEVICE_DETACHED`) and target drive safety checks.
-3. 🥉 **Testability:** Core logic is decoupled from Android hardware APIs and covered by 102 automated tests (101 unit/Robolectric in JVM + 1 Android instrumentation test) on abstract `BlockDevice` doubles.
+3. 🥉 **Testability:** Core logic is decoupled from Android hardware APIs and covered by 108 automated tests (107 unit/Robolectric in JVM + 1 Android instrumentation test) on abstract `BlockDevice` doubles.
 4. **USB Reliability:** SCSI BOT stall recovery routines, clear-halt, and reset recovery (physical controller compatibility matrix pending).
 5. **Block-Device Abstraction:** Zero coupling between UI/engines and Android hardware APIs.
 6. **Partition Correctness:** Strict GPT/MBR alignment, CRC32 checks, and protective structures.
@@ -161,7 +161,7 @@ When building in an environment configured with JDK 21 and Android SDK:
 # 1. Run Android Lint
 ./gradlew lint
 
-# 2. Run automated test suite (101 JVM/Robolectric unit tests)
+# 2. Run automated test suite (107 JVM/Robolectric unit tests)
 ./gradlew test
 
 # 3. Assemble Debug APK
@@ -172,8 +172,8 @@ When building in an environment configured with JDK 21 and Android SDK:
 ```
 
 ### Automated Test Suite Details
-The repository contains **102 automated test methods** across 14 test files:
-- **101 Unit & Robolectric tests** in `app/src/test` (across 13 test files): Covering block device doubles, SCSI CDB construction, FAT32 formatting/allocation, ISO 9660 parsing, GPT/MBR partition engines, Linux/Windows/Ventoy strategies, and foreground service lifecycle.
+The repository contains **108 automated test methods** across 14 test files:
+- **107 Unit & Robolectric tests** in `app/src/test` (across 13 test files): Covering block device doubles, SCSI CDB construction, FAT32 formatting/allocation, ISO 9660 parsing, GPT/MBR partition engines, Linux/Windows/Ventoy strategies, and foreground service lifecycle.
 - **1 Instrumentation test** in `app/src/androidTest`: Context verification (`ExampleInstrumentedTest.kt`).
 - **Physical Hardware Tests:** 0. (All tests run against mock/in-memory abstractions; physical USB hardware and PC boot testing are not automated in CI).
 
