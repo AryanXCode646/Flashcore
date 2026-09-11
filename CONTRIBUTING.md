@@ -51,7 +51,7 @@ Before submitting any Pull Request, you **MUST** run and pass the following thre
 ./gradlew assembleDebug
 ```
 
-All automated unit tests (92 unit/Robolectric tests) must pass with zero failures. If modifying code that affects UI screenshots, update Roborazzi test baselines accordingly.
+All automated unit tests (109 unit/Robolectric tests) must pass with zero failures. If modifying code that affects UI screenshots, update Roborazzi test baselines accordingly.
 
 ---
 
