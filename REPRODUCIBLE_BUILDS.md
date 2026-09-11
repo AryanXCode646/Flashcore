@@ -1,6 +1,10 @@
 # 🔄 Reproducible Builds Guide
 
-FlashCore strives to ensure fully deterministic, verifiable, and reproducible builds. Anyone building the project from source under the same environment should obtain bit-for-bit identical binary artifacts (APKs).
+FlashCore strives to ensure deterministic, verifiable, and reproducible builds. Anyone building the project from source under the reference environment should obtain bit-for-bit identical binary artifacts (APKs).
+
+> [!NOTE]
+> **Release Status Notice:**
+> Official public release tags (e.g. `v1.0.0`) have not yet been published on GitHub. The instructions below describe how to reproduce builds from the current development baseline (`main` branch) and outline the verification process that will apply to all future official tagged releases.
 
 ---
 
@@ -43,11 +47,17 @@ FlashCore applies several Gradle settings to eliminate non-deterministic build i
 
 ## 🔨 Reproduction Instructions
 
-### 1. Check out the Tagged Commit
+### 1. Check out the Source Code
+For development verification:
 ```bash
 git clone https://github.com/ashishsinghbora/Flashcore.git
 cd Flashcore
-git checkout tags/v1.0.0
+git checkout main
+```
+
+For future official releases:
+```bash
+git checkout tags/vX.Y.Z
 ```
 
 ### 2. Verify JDK Environment
@@ -80,10 +90,10 @@ Compute the SHA-256 hash of your reproduced artifact:
 sha256sum app/build/outputs/apk/release/app-release-unsigned.apk
 ```
 
-Compare the digest against the published `SHA256SUMS.txt` on the corresponding GitHub Release.
+When official releases are published, compare this digest against the published `SHA256SUMS.txt` on the corresponding GitHub Release.
 
 ### Deep Inspection with `diffoscope`
-To inspect any trivial differences (e.g. metadata or signing records):
+To inspect any differences (e.g. metadata or signing records):
 ```bash
 diffoscope official-release.apk reproduced-release.apk
 ```

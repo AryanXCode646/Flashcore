@@ -10,8 +10,8 @@ Only the latest active development branch and recent tagged releases receive act
 
 | Version | Supported | Notes |
 | :--- | :---: | :--- |
-| `1.0.x` (current) | ✅ | Active support & security fixes |
-| `< 1.0.0` (alphas) | ❌ | Deprecated prototype builds |
+| `main` branch (pre-release) | ✅ | Active development & security fixes |
+| `< 1.0.0` (alphas / prototypes) | ❌ | Deprecated prototype builds |
 
 ---
 
