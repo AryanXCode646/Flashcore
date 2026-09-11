@@ -172,8 +172,8 @@ When building in an environment configured with JDK 21 and Android SDK:
 ```
 
 ### Automated Test Suite Details
-The repository contains **93 automated test cases** across 13 test files:
-- **92 Unit & Robolectric tests** in `app/src/test`: Covering block device doubles, SCSI CDB construction, FAT32 formatting/allocation, ISO 9660 parsing, GPT/MBR partition engines, Linux/Windows/Ventoy strategies, and foreground service lifecycle.
+The repository contains **93 automated test methods** across 14 test files:
+- **92 Unit & Robolectric tests** in `app/src/test` (across 13 test files): Covering block device doubles, SCSI CDB construction, FAT32 formatting/allocation, ISO 9660 parsing, GPT/MBR partition engines, Linux/Windows/Ventoy strategies, and foreground service lifecycle.
 - **1 Instrumentation test** in `app/src/androidTest`: Context verification (`ExampleInstrumentedTest.kt`).
 - **Physical Hardware Tests:** 0. (All tests run against mock/in-memory abstractions; physical USB hardware and PC boot testing are not automated in CI).
 
