@@ -19,7 +19,9 @@ import com.example.MainActivity
  * Foreground Service for background USB I/O operations.
  *
  * Runs with `FOREGROUND_SERVICE_TYPE_DATA_SYNC` on Android 14+ and holds a
- * `PARTIAL_WAKE_LOCK` to ensure CPU does not sleep during long GB-scale writes.
+ * `PARTIAL_WAKE_LOCK` to ensure the CPU does not enter deep sleep during long GB-scale writes.
+ * Returns `START_NOT_STICKY` so killed processes are not restarted with corrupt zombie state.
+ * Supports direct notification-based cancellation and completion states.
  */
 class FlashForegroundService : Service() {
 
@@ -27,6 +29,13 @@ class FlashForegroundService : Service() {
         const val CHANNEL_ID = "flashcore_io_channel"
         const val NOTIFICATION_ID = 1001
         const val ACTION_CANCEL_FLASH = "com.example.action.CANCEL_FLASH"
+
+        @Volatile
+        var activeInstance: FlashForegroundService? = null
+            private set
+
+        @Volatile
+        var onCancelActionRequested: (() -> Unit)? = null
 
         fun startService(context: Context) {
             val intent = Intent(context, FlashForegroundService::class.java)
@@ -40,6 +49,14 @@ class FlashForegroundService : Service() {
         fun stopService(context: Context) {
             val intent = Intent(context, FlashForegroundService::class.java)
             context.stopService(intent)
+        }
+
+        fun update(statusText: String, progressPercent: Int, speedMBps: Double, etaSeconds: Long) {
+            activeInstance?.updateProgress(statusText, progressPercent, speedMBps, etaSeconds)
+        }
+
+        fun complete(title: String, message: String, isSuccess: Boolean) {
+            activeInstance?.showCompletion(title, message, isSuccess)
         }
     }
 
@@ -55,14 +72,15 @@ class FlashForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        activeInstance = this
         notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         createNotificationChannel()
 
-        // Acquire partial wake lock
+        // Acquire partial wake lock with 4-hour max safety timeout
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "FlashCore:IoWakeLock").apply {
             setReferenceCounted(false)
-            acquire(2 * 60 * 60 * 1000L) // 2 hour max safeguard
+            acquire(4 * 60 * 60 * 1000L)
         }
 
         val initialNotification = buildNotification("Initializing USB Flasher...", 0, 0.0, 0L)
@@ -75,6 +93,15 @@ class FlashForegroundService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, initialNotification)
         }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_CANCEL_FLASH) {
+            onCancelActionRequested?.invoke()
+            updateProgress("Cancelling USB flash operation...", 0, 0.0, 0L)
+            return START_NOT_STICKY
+        }
+        return START_NOT_STICKY
     }
 
     private fun createNotificationChannel() {
@@ -96,6 +123,34 @@ class FlashForegroundService : Service() {
         notificationManager?.notify(NOTIFICATION_ID, notification)
     }
 
+    fun showCompletion(title: String, message: String, isSuccess: Boolean) {
+        val mainIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pIntent = PendingIntent.getActivity(
+            this,
+            0,
+            mainIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val icon = if (isSuccess) android.R.drawable.stat_sys_upload_done else android.R.drawable.stat_notify_error
+
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(message)
+            .setSmallIcon(icon)
+            .setOngoing(false)
+            .setAutoCancel(true)
+            .setContentIntent(pIntent)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .build()
+
+        notificationManager?.notify(NOTIFICATION_ID, notification)
+        stopForeground(STOP_FOREGROUND_DETACH)
+        stopSelf()
+    }
+
     private fun buildNotification(statusText: String, progressPercent: Int, speedMBps: Double, etaSeconds: Long): Notification {
         val mainIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -104,6 +159,16 @@ class FlashForegroundService : Service() {
             this,
             0,
             mainIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val cancelIntent = Intent(this, FlashForegroundService::class.java).apply {
+            action = ACTION_CANCEL_FLASH
+        }
+        val cancelPendingIntent = PendingIntent.getService(
+            this,
+            1,
+            cancelIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
@@ -118,8 +183,9 @@ class FlashForegroundService : Service() {
             .setContentText(subText)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setOngoing(true)
-            .setProgress(100, progressPercent, progressPercent == 0)
+            .setProgress(100, progressPercent.coerceIn(0, 100), progressPercent == 0)
             .setContentIntent(pIntent)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Cancel", cancelPendingIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
             .build()
@@ -127,6 +193,7 @@ class FlashForegroundService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        activeInstance = null
         try {
             if (wakeLock?.isHeld == true) {
                 wakeLock?.release()

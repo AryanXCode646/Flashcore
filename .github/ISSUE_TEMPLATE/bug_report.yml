@@ -1,0 +1,86 @@
+name: 🐛 Bug Report
+description: Report a defect, crash, or unexpected behavior in FlashCore
+title: "[BUG] <concise description>"
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a problem in FlashCore!
+        Before submitting, please check [`LIMITATIONS.md`](https://github.com/ashishsinghbora/Flashcore/blob/main/LIMITATIONS.md) to see if this is an expected hardware constraint.
+
+  - type: input
+    id: phone_model
+    attributes:
+      label: Android Phone Model & Manufacturer
+      description: e.g., Google Pixel 8, Samsung Galaxy S23, Xiaomi 13
+      placeholder: Google Pixel 8 Pro
+    validations:
+      required: true
+
+  - type: input
+    id: android_version
+    attributes:
+      label: Android OS Version & Build
+      description: e.g., Android 14 (API 34), OneUI 6.1, LineageOS 21
+      placeholder: Android 14 (API 34)
+    validations:
+      required: true
+
+  - type: input
+    id: usb_device
+    attributes:
+      label: USB Flash Drive & OTG Adapter
+      description: Include drive brand, reported capacity, USB controller (if known), and OTG adapter type.
+      placeholder: SanDisk Ultra 32GB (USB 3.0), Baseus USB-C to USB-A OTG adapter
+    validations:
+      required: true
+
+  - type: input
+    id: iso_details
+    attributes:
+      label: OS Image / ISO Details
+      description: Name of the OS, version, architecture, and download source.
+      placeholder: ubuntu-24.04-desktop-amd64.iso (5.8 GB)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: flash_strategy
+    attributes:
+      label: Flashing Strategy Selected
+      options:
+        - "Linux Hybrid (Raw DD)"
+        - "Windows UEFI"
+        - "Ventoy Multi-Boot"
+        - "Other / Unknown"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the Bug
+      description: Clear and concise description of what happened versus what you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps_to_reproduce
+    attributes:
+      label: Steps To Reproduce
+      description: Step-by-step instructions to trigger the behavior.
+      placeholder: |
+        1. Connect USB drive via OTG adapter
+        2. Select Ubuntu ISO via file picker
+        3. Tap 'Start Flashing'
+        4. See error at 45% during verification
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logcat / Telemetry Output
+      description: Paste any relevant adb logcat output or error logs from FlashCore.
+      render: shell

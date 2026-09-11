@@ -24,6 +24,7 @@ data class UsbDiskInfo(
 ) {
     val formattedCapacity: String
         get() {
+            if (totalCapacityBytes <= 0L) return "Unknown Capacity"
             val gb = totalCapacityBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
             return if (gb >= 1.0) {
                 "%.2f GB".format(gb)

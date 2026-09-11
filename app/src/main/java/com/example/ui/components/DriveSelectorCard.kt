@@ -100,7 +100,7 @@ fun DriveSelectorCard(
                     )
                     Text(
                         text = if (selectedDevice != null) {
-                            val deviceName = selectedDevice.device?.deviceName ?: "/dev/bus/usb/001/002"
+                            val deviceName = selectedDevice.device?.deviceName ?: "USB Mass Storage"
                             "$deviceName [LUN 0]"
                         } else {
                             "Connect USB OTG flash drive or external SSD"

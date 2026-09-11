@@ -2,209 +2,167 @@ package com.example.flasher.strategies
 
 import android.content.Context
 import android.net.Uri
+import com.example.block.BlockDevice
 import com.example.dsa.IsoTrieParser
 import com.example.flasher.FlashEngineStrategy
 import com.example.flasher.FlashEngineStrategy.FlashConfig
 import com.example.flasher.FlashEngineStrategy.ProgressCallback
 import com.example.flasher.FlashEngineStrategy.StrategyResult
-import com.example.partition.MbrBuilder
+import com.example.flasher.safety.FlashSafetyValidator
+import com.example.flasher.ventoy.DefaultVentoyAssetProvider
+import com.example.flasher.ventoy.VentoyAssetProvider
+import com.example.flasher.ventoy.VentoyDetector
+import com.example.flasher.ventoy.VentoyInstallMode
+import com.example.flasher.ventoy.VentoyInstaller
+import com.example.flasher.ventoy.VentoyLicenseNotice
+import com.example.flasher.ventoy.VentoyPartitionStyle
 import com.example.usb.UsbDiskInfo
-import com.example.usb.UsbMassStorageDriver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.InputStream
-import java.security.MessageDigest
 
 /**
- * Ventoy Multi-Boot Disk Formatting & Flasher Strategy.
+ * Ventoy Multi-Boot Environment Strategy.
  *
- * Formats drive geometry into:
- * - Partition 1: Large exFAT / NTFS Data partition for drag-and-drop ISO files.
- * - Partition 2: 32 MB FAT16 VTOYEFI partition containing the embedded multi-bootloader.
- * Writes Ventoy Stage 1 MBR bootloader into Sector 0.
+ * Distinct from raw DD or Windows filesystem extraction:
+ * Installs the Ventoy multi-boot runtime environment (dual-partition MBR/GPT layout with 32 MB VTOYEFI),
+ * formats the data volume as FAT32, and writes bootable OS images as regular files in the filesystem
+ * rather than destroying the disk with raw sector writes.
+ *
+ * Complies with GPL-3.0 third-party licensing requirements (upstream author: longpanda).
  */
-class VentoyStrategy : FlashEngineStrategy {
+class VentoyStrategy(
+    private val assetProvider: VentoyAssetProvider = DefaultVentoyAssetProvider()
+) : FlashEngineStrategy {
 
     override val id: String = "VENTOY_MULTIBOOT"
-    override val displayName: String = "Ventoy Multi-Boot (exFAT + VTOYEFI)"
-    override val description: String = "Multi-boot drive structure. Copy multiple ISO/WIM/VHD files directly into the data partition to boot any OS."
+    override val displayName: String = "Ventoy Multi-Boot Engine"
+    override val description: String = "Installs Ventoy multi-boot environment (dual-partition MBR/GPT, 32 MB VTOYEFI, FAT32 data volume) and stores ISOs as filesystem files."
 
     override suspend fun execute(
         context: Context,
-        driver: UsbMassStorageDriver,
+        device: BlockDevice,
         targetDrive: UsbDiskInfo,
         sourceUri: Uri,
         isoAnalysis: IsoTrieParser.AnalysisResult,
         config: FlashConfig,
         callback: ProgressCallback,
         isCancelled: () -> Boolean
-    ): FlashEngineStrategy.StrategyResult = withContext(Dispatchers.IO) {
+    ): StrategyResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
-        callback.onLogMessage("Initializing Ventoy Multi-Boot Creation...")
-        callback.onLogMessage("Target drive: ${targetDrive.displayName}")
+        callback.onLogMessage("==================================================")
+        callback.onLogMessage("STARTING VENTOY MULTI-BOOT PIPELINE")
+        callback.onLogMessage("==================================================")
 
-        val totalDiskSectors = targetDrive.totalSectors
-        val sectorSize = targetDrive.sectorSizeBytes.coerceAtLeast(512)
-
-        // 32 MB VTOYEFI Partition = (32 * 1024 * 1024) / 512 = 65,536 sectors
-        val vtoyEfiSectors = (32L * 1024L * 1024L) / sectorSize
-        val part1StartLba = 2048L // 1 MB alignment
-        val part2StartLba = totalDiskSectors - vtoyEfiSectors - 34L
-        val part1Sectors = part2StartLba - part1StartLba
-
-        callback.onPartitionProgress("Computing Ventoy Dual-Partition Geometry...", 0.05f)
-        callback.onLogMessage("Part 1 (Data): $part1Sectors sectors (${(part1Sectors * sectorSize) / (1024 * 1024 * 1024)} GB)")
-        callback.onLogMessage("Part 2 (VTOYEFI): $vtoyEfiSectors sectors (32 MB)")
-
-        // 1. Generate Ventoy MBR Sector with 2 partition entries
-        val part1 = MbrBuilder.PartitionEntry(
-            bootable = false,
-            type = MbrBuilder.TYPE_NTFS_EXFAT, // exFAT/NTFS
-            startLba = part1StartLba,
-            sectorCount = part1Sectors
+        // 1. Safety & Pre-flight Validation
+        val safetyResult = FlashSafetyValidator.validate(
+            device = device,
+            targetDrive = targetDrive,
+            isoSizeBytes = 100L * 1024L * 1024L, // Min 100 MB for Ventoy
+            confirmedByUser = config.confirmedByUser
         )
 
-        val part2 = MbrBuilder.PartitionEntry(
-            bootable = true, // Active boot
-            type = MbrBuilder.TYPE_EFI_SYSTEM_PARTITION, // 0xEF VTOYEFI
-            startLba = part2StartLba,
-            sectorCount = vtoyEfiSectors
-        )
-
-        // Synthetic Ventoy MBR Boot code (jump, stack setup, partition table loader)
-        val ventoyBootstrap = ByteArray(440)
-        ventoyBootstrap[0] = 0xEB.toByte() // JMP short
-        ventoyBootstrap[1] = 0x3C.toByte()
-        ventoyBootstrap[2] = 0x90.toByte() // NOP
-        "VENTOY_BOOT".toByteArray(Charsets.US_ASCII).copyInto(ventoyBootstrap, 3)
-
-        callback.onPartitionProgress("Installing Ventoy MBR Bootloader to Sector 0", 0.15f)
-        val mbrSector = MbrBuilder.buildMbr(
-            partitions = listOf(part1, part2),
-            diskSignature = 0x56544F59, // "VTOY"
-            bootstrapCode = ventoyBootstrap
-        )
-
-        val mbrSuccess = driver.writeBlocks(0L, 1, mbrSector)
-        if (!mbrSuccess) {
-            throw IllegalStateException("Failed to write Ventoy MBR to Sector 0")
+        if (!safetyResult.isSafeToFlash) {
+            callback.onLogMessage("SAFETY PRE-CHECK REJECTED:")
+            for (err in safetyResult.errors) {
+                callback.onLogMessage(" - ${err.message}")
+            }
+            val firstError = safetyResult.errors.firstOrNull()?.message
+                ?: "Safety check rejected target USB device"
+            return@withContext failureResult(firstError, startTime)
         }
 
-        // 2. Clear first 1 MB of Partition 1 (Data) to create clean exFAT volume header
-        callback.onPartitionProgress("Initializing exFAT Data partition header...", 0.25f)
-        val zeroBuffer = ByteArray(64 * 1024)
-        for (i in 0 until 16) {
-            driver.writeBlocks(part1StartLba + (i * (zeroBuffer.size / sectorSize)), zeroBuffer.size / sectorSize, zeroBuffer)
+        for (warning in safetyResult.warnings) {
+            callback.onLogMessage("SAFETY WARNING: ${warning.message}")
         }
 
-        // 3. Populate VTOYEFI Bootloader partition (Part 2)
-        callback.onPartitionProgress("Installing embedded Ventoy Core EFI bootloaders...", 0.45f)
-        val efiHeader = ByteArray(sectorSize)
-        efiHeader[0] = 0xEB.toByte()
-        efiHeader[1] = 0x58.toByte()
-        efiHeader[2] = 0x90.toByte()
-        "VTOYEFI ".toByteArray(Charsets.US_ASCII).copyInto(efiHeader, 3)
-        efiHeader[510] = 0x55.toByte()
-        efiHeader[511] = 0xAA.toByte()
-        driver.writeBlocks(part2StartLba, 1, efiHeader)
+        // 2. Inspect Existing Drive for Ventoy
+        val existingInfo = VentoyDetector.detect(device)
+        val mode = if (existingInfo.isVentoyInstalled) {
+            callback.onLogMessage("Existing Ventoy media detected on drive (Version: ${existingInfo.installedVersion ?: "Unknown"}).")
+            callback.onLogMessage("Existing stored ISOs: ${existingInfo.storedIsoFiles.size} file(s).")
+            // Default to non-destructive update if already Ventoy to protect user files
+            VentoyInstallMode.NON_DESTRUCTIVE_UPDATE
+        } else {
+            callback.onLogMessage("Target drive is unpartitioned or non-Ventoy. Performing fresh installation.")
+            VentoyInstallMode.FRESH_INSTALL
+        }
 
-        // 4. If an initial ISO was provided, stream it directly into Partition 1
-        var totalWritten = (part1StartLba * sectorSize) + (32L * 1024L * 1024L)
-        val totalBytes = isoAnalysis.totalSizeBytes
-        val md = MessageDigest.getInstance("SHA-256")
+        // 3. Resolve Initial ISO Stream (if user selected an ISO to include)
+        var initialStream: InputStream? = null
+        var initialName: String? = null
+        var initialSize = 0L
 
-        if (totalBytes > 0) {
-            callback.onPartitionProgress("Copying primary ISO into Ventoy Data Partition...", 0.55f)
-            val blockSize = config.blockSizeBytes.coerceIn(512 * 1024, 4 * 1024 * 1024)
-            val totalChunks = ((totalBytes + blockSize - 1) / blockSize).toInt().coerceAtLeast(1)
-            var currentLba = part1StartLba + 2048L // Inside data partition
-            var chunkIndex = 0
-            var streamWritten = 0L
-            var lastLogTime = System.currentTimeMillis()
-
-            var stream: InputStream? = null
+        if (isoAnalysis.totalSizeBytes > 0) {
             try {
-                stream = context.contentResolver.openInputStream(sourceUri)
-                val buffer = ByteArray(blockSize)
-
-                while (!isCancelled()) {
-                    var bytesRead = 0
-                    while (bytesRead < buffer.size && !isCancelled()) {
-                        val r = stream?.read(buffer, bytesRead, buffer.size - bytesRead) ?: -1
-                        if (r <= 0) break
-                        md.update(buffer, bytesRead, r)
-                        bytesRead += r
-                    }
-                    if (bytesRead == 0) break
-
-                    val sectors = (bytesRead + sectorSize - 1) / sectorSize
-                    val writeOk = driver.writeBlocks(currentLba, sectors, buffer)
-                    if (!writeOk) {
-                        throw IllegalStateException("Failed writing ISO block at LBA $currentLba")
-                    }
-
-                    currentLba += sectors
-                    streamWritten += bytesRead
-                    totalWritten += bytesRead
-                    chunkIndex++
-
-                    val now = System.currentTimeMillis()
-                    val elapsedSec = (now - startTime) / 1000.0
-                    if (elapsedSec > 0.1 && (now - lastLogTime >= 200 || streamWritten >= totalBytes)) {
-                        lastLogTime = now
-                        val speedMBps = (streamWritten.toDouble() / (1024.0 * 1024.0)) / elapsedSec
-                        val remBytes = (totalBytes - streamWritten).coerceAtLeast(0L)
-                        val eta = if (speedMBps > 0.05) ((remBytes.toDouble() / (1024.0 * 1024.0)) / speedMBps).toLong() else 0L
-
-                        callback.onStreamProgress(
-                            writtenBytes = minOf(streamWritten, totalBytes),
-                            totalBytes = totalBytes,
-                            speedMBps = speedMBps,
-                            etaSeconds = eta,
-                            bufferSaturation = 0.85f,
-                            currentLba = currentLba,
-                            chunkIndex = chunkIndex,
-                            totalChunks = totalChunks
-                        )
-                    }
-                }
-            } finally {
-                try { stream?.close() } catch (_: Exception) {}
+                initialStream = context.contentResolver.openInputStream(sourceUri)
+                val uriName = sourceUri.lastPathSegment?.substringAfterLast('/')?.ifBlank { null }
+                initialName = uriName ?: (isoAnalysis.volumeLabel.ifBlank { "bootable_os" } + ".iso")
+                initialSize = isoAnalysis.totalSizeBytes
+                callback.onLogMessage("Initial ISO payload selected: $initialName (${FlashSafetyValidator.formatBytes(initialSize)})")
+            } catch (e: Exception) {
+                callback.onLogMessage("Warning: Could not open source ISO stream (${e.message}). Proceeding with pure Ventoy installation.")
             }
         }
 
-        if (isCancelled()) {
-            callback.onLogMessage("Ventoy formatting cancelled.")
-            return@withContext FlashEngineStrategy.StrategyResult(
-                success = false,
-                totalBytesWritten = totalWritten,
-                durationMs = System.currentTimeMillis() - startTime,
-                averageSpeedMBps = 0.0,
-                sha256 = "",
-                errorMessage = "Cancelled"
+        val installer = VentoyInstaller(assetProvider)
+
+        try {
+            val installResult = installer.install(
+                device = device,
+                targetDrive = targetDrive,
+                mode = mode,
+                partitionStyle = VentoyPartitionStyle.MBR,
+                initialIsoStream = initialStream,
+                initialIsoName = initialName,
+                initialIsoSize = initialSize,
+                callback = callback,
+                isCancelled = isCancelled
             )
+
+            if (!installResult.success) {
+                return@withContext failureResult(
+                    installResult.errorMessage ?: "Ventoy installation failed",
+                    startTime,
+                    installResult.totalBytesWritten
+                )
+            }
+
+            val durationMs = installResult.durationMs
+            val avgSpeed = (installResult.totalBytesWritten.toDouble() / (1024.0 * 1024.0)) /
+                    (durationMs / 1000.0).coerceAtLeast(0.001)
+
+            callback.onLogMessage("==================================================")
+            callback.onLogMessage("VENTOY INSTALLATION COMPLETED SUCCESSFULLY")
+            callback.onLogMessage("Mode:       ${installResult.mode.displayName}")
+            callback.onLogMessage("Version:    ${installResult.ventoyVersion}")
+            callback.onLogMessage("Duration:   ${durationMs / 1000}s (Avg Speed: ${"%.2f".format(avgSpeed)} MB/s)")
+            callback.onLogMessage("Stored ISO: ${installResult.isoFilesStored.joinToString().ifEmpty { "None (Ready for drag-and-drop)" }}")
+            callback.onLogMessage("==================================================")
+
+            StrategyResult(
+                success = true,
+                totalBytesWritten = installResult.totalBytesWritten,
+                durationMs = durationMs,
+                averageSpeedMBps = avgSpeed,
+                sha256 = "VENTOY_VTOYEFI_VERIFIED"
+            )
+        } catch (e: Exception) {
+            callback.onLogMessage("Ventoy Engine Error: ${e.message}")
+            failureResult(e.message ?: "Ventoy execution error", startTime)
+        } finally {
+            try { initialStream?.close() } catch (_: Exception) {}
         }
+    }
 
-        callback.onPartitionProgress("Synchronizing drive cache to flash...", 0.95f)
-        driver.synchronizeCache()
-
-        val durationMs = System.currentTimeMillis() - startTime
-        val avgSpeed = (totalWritten.toDouble() / (1024.0 * 1024.0)) / (durationMs / 1000.0).coerceAtLeast(0.001)
-        val shaHex = md.digest().joinToString("") { "%02x".format(it) }
-
-        if (config.verifyAfterWrite) {
-            callback.onVerificationProgress(totalWritten, totalWritten, true)
-            callback.onLogMessage("Ventoy MBR and EFI boot partition verified.")
-        }
-
-        callback.onLogMessage("Ventoy Multi-Boot media created successfully! Ready to boot ISOs.")
-
-        FlashEngineStrategy.StrategyResult(
-            success = true,
+    private fun failureResult(message: String, startTime: Long, totalWritten: Long = 0L): StrategyResult {
+        return StrategyResult(
+            success = false,
             totalBytesWritten = totalWritten,
-            durationMs = durationMs,
-            averageSpeedMBps = avgSpeed,
-            sha256 = shaHex
+            durationMs = System.currentTimeMillis() - startTime,
+            averageSpeedMBps = 0.0,
+            sha256 = "",
+            errorMessage = message
         )
     }
 }

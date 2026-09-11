@@ -1,0 +1,82 @@
+name: 🔌 Hardware Compatibility Report
+description: Report results from testing FlashCore on physical USB flash drives and PC motherboards
+title: "[HARDWARE] <USB Drive Model> on <PC Motherboard / Phone>"
+labels: ["hardware-test", "compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Real-world hardware testing is critical to FlashCore's trustworthiness!
+        Please share your physical test results to help build our verified hardware compatibility matrix.
+
+  - type: input
+    id: android_phone
+    attributes:
+      label: Android Host Phone
+      description: Phone model, chipset, and Android OS version.
+      placeholder: Pixel 7 (Tensor G2, Android 14)
+    validations:
+      required: true
+
+  - type: input
+    id: usb_drive
+    attributes:
+      label: USB Flash Drive Tested
+      description: Manufacturer, model, capacity, USB version, controller chip (if known via ChipGenius/lsusb).
+      placeholder: Kingston DataTraveler Kyson 64GB USB 3.2 (Phison PS2251-19)
+    validations:
+      required: true
+
+  - type: input
+    id: otg_adapter
+    attributes:
+      label: OTG Adapter / Cable
+      description: Cable brand, direct plug or hub, USB version.
+      placeholder: Anker USB-C to USB 3.0 female OTG adapter
+    validations:
+      required: true
+
+  - type: input
+    id: pc_specs
+    attributes:
+      label: Target PC / Motherboard Tested
+      description: Motherboard brand/model, CPU architecture (x86_64, ARM64), BIOS/UEFI version.
+      placeholder: ASUS ROG Strix B550-F, AMD Ryzen 5600X, UEFI BIOS v3404
+    validations:
+      required: true
+
+  - type: dropdown
+    id: boot_mode
+    attributes:
+      label: Target Boot Mode Tested
+      options:
+        - "UEFI with Secure Boot Enabled"
+        - "UEFI with Secure Boot Disabled"
+        - "Legacy BIOS / CSM"
+        - "Both UEFI and Legacy BIOS"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: result
+    attributes:
+      label: Overall Boot & Installation Result
+      options:
+        - "🟢 Flashed Successfully & Booted Cleanly into OS Installer"
+        - "🟡 Flashed Successfully, Booted with Quirks/Workarounds"
+        - "🔴 Flashed Successfully, but Failed to Boot on PC"
+        - "❌ Flashing Failed on Android (USB I/O error or verification failure)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: details
+    attributes:
+      label: Telemetry & Additional Details
+      description: Flashing throughput (MB/s), duration, read-back verification result, and any boot quirks encountered.
+      placeholder: |
+        Write Speed: 18.5 MB/s average
+        Verification: 100% bit-for-bit passed in FlashVerifier
+        Boot: Booted Ubuntu installer within 12 seconds
+    validations:
+      required: true

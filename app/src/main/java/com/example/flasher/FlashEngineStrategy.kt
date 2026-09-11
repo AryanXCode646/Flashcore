@@ -2,9 +2,9 @@ package com.example.flasher
 
 import android.content.Context
 import android.net.Uri
+import com.example.block.BlockDevice
 import com.example.dsa.IsoTrieParser
 import com.example.usb.UsbDiskInfo
-import com.example.usb.UsbMassStorageDriver
 
 /**
  * Strategy Pattern Interface for Bootable USB Flashing Engines.
@@ -19,7 +19,11 @@ interface FlashEngineStrategy {
         val blockSizeBytes: Int = 1024 * 1024, // 1 MB default
         val verifyAfterWrite: Boolean = true,
         val autoSplitWim: Boolean = true,
-        val targetFileSystem: TargetFs = TargetFs.FAT32_UEFI
+        val targetFileSystem: TargetFs = TargetFs.FAT32_UEFI,
+        val expectedChecksum: String? = null,
+        val checksumAlgorithm: String = "SHA-256",
+        val confirmedByUser: Boolean = true,
+        val requireIsohybrid: Boolean = false
     )
 
     enum class TargetFs(val label: String) {
@@ -46,7 +50,7 @@ interface FlashEngineStrategy {
 
     suspend fun execute(
         context: Context,
-        driver: UsbMassStorageDriver,
+        device: BlockDevice,
         targetDrive: UsbDiskInfo,
         sourceUri: Uri,
         isoAnalysis: IsoTrieParser.AnalysisResult,

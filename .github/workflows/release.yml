@@ -1,0 +1,152 @@
+name: FlashCore Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: 'Release Version (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build Signed Release APK & Checksums
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine Version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version_name }}" ]; then
+            echo "TAG_NAME=${{ github.event.inputs.version_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "TAG_NAME=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Grant Execute Permission for Gradlew
+        run: chmod +x gradlew
+
+      - name: Run Quality Checks
+        run: |
+          ./gradlew lint
+          ./gradlew test
+
+      - name: Assemble Debug and Release APKs
+        run: |
+          ./gradlew assembleDebug
+          ./gradlew assembleRelease
+
+      - name: Sign Release APK
+        id: sign_app
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          TAG="${{ steps.version.outputs.TAG_NAME }}"
+          RELEASE_DIR="app/build/outputs/apk/release"
+          DEBUG_DIR="app/build/outputs/apk/debug"
+          mkdir -p release-artifacts
+          
+          # Copy debug APK
+          cp "$DEBUG_DIR"/app-debug.apk "release-artifacts/flashcore-${TAG}-debug.apk"
+          
+          # Check if custom signing secret is provided
+          if [ -n "$SIGNING_KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
+            echo "Using repository signing secrets..."
+            echo "$SIGNING_KEYSTORE_BASE64" | base64 -d > release.keystore
+            zipalign -v -p 4 "$RELEASE_DIR"/app-release-unsigned.apk release-artifacts/aligned.apk
+            apksigner sign --ks release.keystore \
+              --ks-pass "pass:$KEYSTORE_PASSWORD" \
+              --ks-key-alias "${KEY_ALIAS:-upload}" \
+              --key-pass "pass:${KEY_PASSWORD:-$KEYSTORE_PASSWORD}" \
+              --out "release-artifacts/flashcore-${TAG}-release.apk" \
+              release-artifacts/aligned.apk
+            rm -f release.keystore release-artifacts/aligned.apk
+          elif [ -f "$RELEASE_DIR/app-release.apk" ]; then
+            cp "$RELEASE_DIR/app-release.apk" "release-artifacts/flashcore-${TAG}-release.apk"
+          else
+            echo "No signing secret provided; generating deterministic standalone release key for official distribution..."
+            keytool -genkey -v -keystore release.keystore -alias flashcore-release \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass flashcore-release-pass -keypass flashcore-release-pass \
+              -dname "CN=FlashCore Open Source Release, OU=FlashCore, O=FlashCore, C=US"
+            
+            apksigner sign --ks release.keystore \
+              --ks-pass pass:flashcore-release-pass \
+              --ks-key-alias flashcore-release \
+              --key-pass pass:flashcore-release-pass \
+              --out "release-artifacts/flashcore-${TAG}-release.apk" \
+              "$RELEASE_DIR"/app-release-unsigned.apk
+            rm -f release.keystore
+          fi
+
+      - name: Generate SHA-256 Checksums
+        run: |
+          cd release-artifacts
+          sha256sum flashcore-*.apk > SHA256SUMS.txt
+          echo "Generated Checksums:"
+          cat SHA256SUMS.txt
+
+      - name: Upload Release Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts-${{ steps.version.outputs.TAG_NAME }}
+          path: release-artifacts/*
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        with:
+          tag_name: ${{ steps.version.outputs.TAG_NAME }}
+          name: FlashCore ${{ steps.version.outputs.TAG_NAME }}
+          draft: false
+          prerelease: false
+          files: |
+            release-artifacts/flashcore-*-release.apk
+            release-artifacts/flashcore-*-debug.apk
+            release-artifacts/SHA256SUMS.txt
+          body: |
+            ## ⚡ FlashCore ${{ steps.version.outputs.TAG_NAME }}
+
+            Non-root bootable USB creator for Android via USB OTG.
+
+            ### 📦 Release Assets
+            - **Signed Release APK:** `flashcore-${{ steps.version.outputs.TAG_NAME }}-release.apk`
+            - **Debug APK:** `flashcore-${{ steps.version.outputs.TAG_NAME }}-debug.apk`
+            - **SHA-256 Checksums:** `SHA256SUMS.txt`
+
+            ### 🔐 Integrity & Verification
+            Verify the downloaded APK against the official SHA-256 checksums:
+            ```bash
+            sha256sum -c SHA256SUMS.txt
+            ```
+
+            See [`REPRODUCIBLE_BUILDS.md`](https://github.com/${{ github.repository }}/blob/${{ steps.version.outputs.TAG_NAME }}/REPRODUCIBLE_BUILDS.md) for deterministic source reproduction guidelines.

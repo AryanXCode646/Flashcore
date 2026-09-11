@@ -17,15 +17,15 @@ object RollingChecksumEngine {
      */
     fun computeCrc32(buffer: ByteBuffer, offset: Int, length: Int): Long {
         val crc = CRC32()
-        val originalPos = buffer.position()
-        val originalLimit = buffer.limit()
-
-        buffer.position(offset)
-        buffer.limit(offset + length)
-        crc.update(buffer)
-
-        buffer.position(originalPos)
-        buffer.limit(originalLimit)
+        if (buffer.hasArray()) {
+            crc.update(buffer.array(), buffer.arrayOffset() + offset, length)
+        } else {
+            val temp = ByteArray(length)
+            val dup = buffer.duplicate()
+            dup.position(offset)
+            dup.get(temp, 0, length)
+            crc.update(temp, 0, length)
+        }
         return crc.value
     }
 

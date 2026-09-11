@@ -59,6 +59,8 @@ class IsoTrieParser {
         val architecture: String,
         val allEntries: List<IsoEntry>
     ) {
+        val isIsohybrid: Boolean get() = imageType == ImageType.LINUX_HYBRID
+
         val formattedSize: String
             get() {
                 val gb = totalSizeBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)

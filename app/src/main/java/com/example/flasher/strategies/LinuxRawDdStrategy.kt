@@ -2,6 +2,7 @@ package com.example.flasher.strategies
 
 import android.content.Context
 import android.net.Uri
+import com.example.block.BlockDevice
 import com.example.dsa.DirectRingBuffer
 import com.example.dsa.IsoTrieParser
 import com.example.dsa.RollingChecksumEngine
@@ -9,16 +10,21 @@ import com.example.flasher.FlashEngineStrategy
 import com.example.flasher.FlashEngineStrategy.FlashConfig
 import com.example.flasher.FlashEngineStrategy.ProgressCallback
 import com.example.flasher.FlashEngineStrategy.StrategyResult
+import com.example.flasher.checksum.ChecksumValidator
+import com.example.flasher.safety.FlashSafetyValidator
+import com.example.flasher.verification.FlashVerifier
 import com.example.usb.UsbDiskInfo
-import com.example.usb.UsbMassStorageDriver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.InputStream
 import java.security.MessageDigest
 
 /**
- * Linux Hybrid DD Raw Image Flashing Strategy.
- * Streams ISO/IMG bytes directly starting at LBA 0 (Sector 0) using SPSC DirectRingBuffer.
+ * Production-Quality Linux Hybrid DD Raw Image Flashing Strategy.
+ *
+ * Implements the complete end-to-end flashing pipeline:
+ * ISO -> Validate -> Optional Checksum -> USB Capacity Check -> Safety Warnings ->
+ * Raw Write -> Flush -> Genuine Verification (Source Block vs USB Read) -> Success.
  */
 class LinuxRawDdStrategy : FlashEngineStrategy {
 
@@ -28,22 +34,135 @@ class LinuxRawDdStrategy : FlashEngineStrategy {
 
     override suspend fun execute(
         context: Context,
-        driver: UsbMassStorageDriver,
+        device: BlockDevice,
         targetDrive: UsbDiskInfo,
         sourceUri: Uri,
         isoAnalysis: IsoTrieParser.AnalysisResult,
         config: FlashConfig,
         callback: ProgressCallback,
         isCancelled: () -> Boolean
-    ): FlashEngineStrategy.StrategyResult = withContext(Dispatchers.IO) {
+    ): StrategyResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
-        callback.onLogMessage("Initializing Linux Raw DD Strategy...")
-        callback.onLogMessage("Target drive: ${targetDrive.displayName}, Sector size: ${targetDrive.sectorSizeBytes} bytes")
+        callback.onLogMessage("==================================================")
+        callback.onLogMessage("STARTING LINUX RAW DD FLASH PIPELINE")
+        callback.onLogMessage("==================================================")
 
+        // ---------------------------------------------------------------------
+        // STEP 1: ISO VALIDATION
+        // ---------------------------------------------------------------------
+        callback.onPartitionProgress("Validating Source ISO Image...", 0.02f)
         val totalBytes = isoAnalysis.totalSizeBytes
+        if (totalBytes <= 0L) {
+            val err = "Invalid source image: report size is 0 bytes"
+            callback.onLogMessage("ERROR: $err")
+            return@withContext failureResult(err, startTime)
+        }
+
+        // Validate stream can be opened
+        val streamCheck = try {
+            context.contentResolver.openInputStream(sourceUri)?.use { it.read() }
+        } catch (e: Exception) {
+            val err = "Cannot read source ISO URI: ${e.message}"
+            callback.onLogMessage("ERROR: $err")
+            return@withContext failureResult(err, startTime)
+        }
+
+        if (streamCheck == null || streamCheck == -1) {
+            val err = "Source image stream is empty or inaccessible"
+            callback.onLogMessage("ERROR: $err")
+            return@withContext failureResult(err, startTime)
+        }
+
+        if (config.requireIsohybrid && !isoAnalysis.isIsohybrid) {
+            val err = "Selected ISO is not an isohybrid image (no MBR boot code at Sector 0). Direct raw DD writing may produce non-bootable media."
+            callback.onLogMessage("ERROR: $err")
+            return@withContext failureResult(err, startTime)
+        }
+
+        callback.onLogMessage("ISO Validation OK: ${isoAnalysis.volumeLabel} (${FlashSafetyValidator.formatBytes(totalBytes)}), Isohybrid=${isoAnalysis.isIsohybrid}")
+
+        // ---------------------------------------------------------------------
+        // STEP 2: OPTIONAL SOURCE CHECKSUM VERIFICATION
+        // ---------------------------------------------------------------------
+        if (!config.expectedChecksum.isNullOrBlank()) {
+            callback.onPartitionProgress("Verifying Source Image Checksum...", 0.05f)
+            callback.onLogMessage("Calculating source ${config.checksumAlgorithm} digest before writing...")
+
+            val (actualDigest, bytesHashed) = try {
+                context.contentResolver.openInputStream(sourceUri)?.use { stream ->
+                    ChecksumValidator.computeDigest(
+                        stream = stream,
+                        algorithm = config.checksumAlgorithm,
+                        onProgress = { read ->
+                            val pct = ((read.toDouble() / totalBytes.toDouble()) * 100.0).coerceIn(0.0, 100.0)
+                            if (read % (32 * 1024 * 1024) == 0L) {
+                                callback.onLogMessage("Hashing source image: %.1f%% (%s / %s)".format(
+                                    pct, FlashSafetyValidator.formatBytes(read), FlashSafetyValidator.formatBytes(totalBytes)
+                                ))
+                            }
+                        },
+                        isCancelled = isCancelled
+                    )
+                } ?: Pair("", 0L)
+            } catch (e: Exception) {
+                val err = "Source checksum calculation failed: ${e.message}"
+                callback.onLogMessage("ERROR: $err")
+                return@withContext failureResult(err, startTime)
+            }
+
+            if (isCancelled()) {
+                callback.onLogMessage("Operation cancelled during source checksum verification.")
+                return@withContext failureResult("Operation cancelled", startTime)
+            }
+
+            callback.onLogMessage("Source Calculated ${config.checksumAlgorithm}: $actualDigest")
+            callback.onLogMessage("Expected Checksum:                     ${config.expectedChecksum}")
+
+            val matches = ChecksumValidator.verifyChecksum(actualDigest, config.expectedChecksum)
+            if (!matches) {
+                val err = "SOURCE CHECKSUM MISMATCH! Expected ${config.expectedChecksum} but calculated $actualDigest. Aborting flash to protect target media."
+                callback.onLogMessage("ERROR: $err")
+                return@withContext failureResult(err, startTime)
+            }
+            callback.onLogMessage("Source checksum matches expected digest.")
+        }
+
+        // ---------------------------------------------------------------------
+        // STEP 3: USB CAPACITY CHECK & SAFETY VALIDATION
+        // ---------------------------------------------------------------------
+        callback.onPartitionProgress("Verifying Target Drive Safety & Geometry...", 0.08f)
+        val safetyResult = FlashSafetyValidator.validate(
+            device = device,
+            targetDrive = targetDrive,
+            isoSizeBytes = totalBytes,
+            confirmedByUser = config.confirmedByUser
+        )
+
+        callback.onLogMessage("Device Identity: ${safetyResult.identity.vendorString} ${safetyResult.identity.productString} (S/N: ${safetyResult.identity.serialNumber})")
+        callback.onLogMessage("Capacity: ${FlashSafetyValidator.formatBytes(safetyResult.identity.totalCapacityBytes)} (${safetyResult.identity.totalSectors} sectors @ ${safetyResult.identity.sectorSizeBytes} B/sector)")
+
+        // Check for fatal errors (e.g., insufficient capacity, write-protected, unconfirmed)
+        if (safetyResult.errors.isNotEmpty()) {
+            for (err in safetyResult.errors) {
+                callback.onLogMessage("[SAFETY ERROR] ${err.title}: ${err.message}")
+            }
+            val primaryError = safetyResult.errors.first().message
+            return@withContext failureResult(primaryError, startTime)
+        }
+
+        // Log warnings (e.g. existing partitions will be wiped)
+        if (safetyResult.warnings.isNotEmpty()) {
+            for (warn in safetyResult.warnings) {
+                callback.onLogMessage("[SAFETY WARNING] ${warn.title}: ${warn.message}")
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // STEP 4: RAW STREAMING WRITE (Sector 0 Direct DD)
+        // ---------------------------------------------------------------------
+        callback.onPartitionProgress("Streaming Bootloader & Partitions to Sector 0...", 0.10f)
         val blockSize = config.blockSizeBytes.coerceIn(512 * 1024, 4 * 1024 * 1024)
         val sectorSize = targetDrive.sectorSizeBytes.coerceAtLeast(512)
-        val blocksPerChunk = blockSize / sectorSize
         val totalChunks = ((totalBytes + blockSize - 1) / blockSize).toInt().coerceAtLeast(1)
 
         val ringBuffer = DirectRingBuffer(chunkCapacity = 16, chunkSizeBytes = blockSize)
@@ -54,7 +173,7 @@ class LinuxRawDdStrategy : FlashEngineStrategy {
         var currentLba = 0L
         var chunkIndex = 0
 
-        // Coroutine / Thread 1: Producer (Reads from InputStream into DirectRingBuffer)
+        // Producer Thread: Streams from source URI into DirectRingBuffer
         val producerThread = Thread {
             var stream: InputStream? = null
             try {
@@ -95,7 +214,7 @@ class LinuxRawDdStrategy : FlashEngineStrategy {
                     bytesRemaining -= toReadThisChunk
                 }
             } catch (e: Exception) {
-                callback.onLogMessage("Producer encountered error: ${e.message}")
+                callback.onLogMessage("Producer error: ${e.message}")
             } finally {
                 try { stream?.close() } catch (_: Exception) {}
                 ringBuffer.close()
@@ -103,17 +222,15 @@ class LinuxRawDdStrategy : FlashEngineStrategy {
         }
         producerThread.start()
 
-        // Main Thread / Consumer: Takes direct buffers and transfers to USB via BOT
+        // Consumer Loop: Writes direct buffers to BlockDevice
         try {
-            callback.onPartitionProgress("Writing Sector 0 Boot Header & Partition Table", 0.05f)
-
             while (!isCancelled()) {
-                val readSlot = ringBuffer.acquireReadSlot() ?: break // Stream completed
+                val readSlot = ringBuffer.acquireReadSlot() ?: break // Streaming finished
 
                 val bytesToWrite = readSlot.validBytes
                 val sectorsThisChunk = bytesToWrite / sectorSize
 
-                val writeSuccess = driver.writeDirectBuffer(
+                val writeSuccess = device.writeDirectBuffer(
                     lba = currentLba,
                     blockCount = sectorsThisChunk,
                     directBuffer = readSlot.buffer,
@@ -122,7 +239,7 @@ class LinuxRawDdStrategy : FlashEngineStrategy {
                 )
 
                 if (!writeSuccess) {
-                    throw IllegalStateException("SCSI WRITE_10 failed at LBA $currentLba (Chunk $chunkIndex)")
+                    throw IllegalStateException("SCSI write failed at LBA $currentLba (Chunk $chunkIndex)")
                 }
 
                 ringBuffer.commitRead(readSlot.slotIndex)
@@ -133,9 +250,9 @@ class LinuxRawDdStrategy : FlashEngineStrategy {
 
                 val now = System.currentTimeMillis()
                 val elapsedSec = (now - startTime) / 1000.0
-                if (elapsedSec > 0.1 && (now - lastLogTime >= 200 || totalWritten >= totalBytes)) {
+                if ((now - lastLogTime >= 200) || totalWritten >= totalBytes) {
                     lastLogTime = now
-                    val speedMBps = (totalWritten.toDouble() / (1024.0 * 1024.0)) / elapsedSec
+                    val speedMBps = if (elapsedSec > 0.001) (totalWritten.toDouble() / (1024.0 * 1024.0)) / elapsedSec else 0.0
                     val remainingBytes = (totalBytes - totalWritten).coerceAtLeast(0L)
                     val etaSeconds = if (speedMBps > 0.05) ((remainingBytes.toDouble() / (1024.0 * 1024.0)) / speedMBps).toLong() else 0L
                     val saturation = ringBuffer.getSaturation()
@@ -151,57 +268,111 @@ class LinuxRawDdStrategy : FlashEngineStrategy {
                         totalChunks = totalChunks
                     )
                 }
+
+                if (isCancelled()) {
+                    break
+                }
             }
 
             if (isCancelled()) {
-                callback.onLogMessage("Flashing cancelled by user.")
-                return@withContext FlashEngineStrategy.StrategyResult(
-                    success = false,
-                    totalBytesWritten = totalWritten,
-                    durationMs = System.currentTimeMillis() - startTime,
-                    averageSpeedMBps = 0.0,
-                    sha256 = "",
-                    errorMessage = "Operation cancelled"
-                )
+                callback.onLogMessage("Flashing cancelled by user during write.")
+                return@withContext failureResult("Operation cancelled by user", startTime, totalWritten)
             }
 
-            // Sync cache to drive
-            callback.onPartitionProgress("Synchronizing drive cache to NAND flash...", 0.95f)
-            callback.onLogMessage("Executing SCSI SYNCHRONIZE_CACHE_10 (0x35)...")
-            driver.synchronizeCache()
+            // -----------------------------------------------------------------
+            // STEP 5: FLUSH (Synchronize Cache)
+            // -----------------------------------------------------------------
+            callback.onPartitionProgress("Synchronizing drive write cache to NAND...", 0.85f)
+            callback.onLogMessage("Executing cache flush (SCSI SYNCHRONIZE CACHE)...")
+            device.flush()
+            callback.onLogMessage("Cache synchronized.")
 
             val durationMs = System.currentTimeMillis() - startTime
             val avgSpeed = (totalWritten.toDouble() / (1024.0 * 1024.0)) / (durationMs / 1000.0).coerceAtLeast(0.001)
-            val shaHex = md.digest().joinToString("") { "%02x".format(it) }
+            val writtenShaHex = md.digest().joinToString("") { "%02x".format(it) }
 
-            // Optional Verification Pass
+            // -----------------------------------------------------------------
+            // STEP 6: GENUINE VERIFICATION (Source Block vs USB Read)
+            // -----------------------------------------------------------------
             if (config.verifyAfterWrite) {
-                callback.onVerificationProgress(totalBytes, totalBytes, true)
-                callback.onLogMessage("Verification complete: Sector blocks checksum matched.")
+                callback.onPartitionProgress("Verifying written media (Source block vs USB read)...", 0.88f)
+                callback.onLogMessage("Starting bit-for-bit media verification...")
+
+                val verificationResult = FlashVerifier.verify(
+                    device = device,
+                    sourceStreamProvider = {
+                        context.contentResolver.openInputStream(sourceUri)
+                            ?: throw IllegalStateException("Cannot reopen source ISO stream for verification")
+                    },
+                    totalBytesToVerify = totalBytes,
+                    sectorSizeBytes = sectorSize,
+                    chunkSizeBytes = blockSize,
+                    startLba = 0L,
+                    onProgress = { verified, total, speed ->
+                        callback.onVerificationProgress(verified, total, true)
+                        val pct = ((verified.toDouble() / total.toDouble()) * 100.0).coerceIn(0.0, 100.0)
+                        val vProgress = 0.88f + ((verified.toFloat() / total.toFloat()) * 0.11f)
+                        callback.onPartitionProgress("Verifying written sectors: %.0f%% (%.1f MB/s)".format(pct, speed), vProgress)
+                    },
+                    isCancelled = isCancelled
+                )
+
+                if (isCancelled()) {
+                    callback.onLogMessage("Operation cancelled by user during verification.")
+                    return@withContext failureResult("Operation cancelled by user", startTime, totalWritten)
+                }
+
+                if (!verificationResult.success) {
+                    val err = verificationResult.errorMessage ?: "Target media verification failed"
+                    callback.onLogMessage("[VERIFICATION FAILED] $err")
+                    callback.onVerificationProgress(verificationResult.verifiedBytes, totalBytes, false)
+                    return@withContext StrategyResult(
+                        success = false,
+                        totalBytesWritten = totalWritten,
+                        durationMs = System.currentTimeMillis() - startTime,
+                        averageSpeedMBps = avgSpeed,
+                        sha256 = writtenShaHex,
+                        errorMessage = err
+                    )
+                }
+
+                callback.onLogMessage("Target media verification PASSED: 100% of ${FlashSafetyValidator.formatBytes(verificationResult.verifiedBytes)} verified bit-for-bit with 0 sector mismatches.")
+                callback.onLogMessage("Source SHA-256: ${verificationResult.sourceSha256}")
+                callback.onLogMessage("Target SHA-256: ${verificationResult.targetSha256}")
+            } else {
+                callback.onLogMessage("Verification skipped by user configuration.")
             }
 
+            // -----------------------------------------------------------------
+            // STEP 7: SUCCESS
+            // -----------------------------------------------------------------
+            callback.onPartitionProgress("Flashing Completed Successfully!", 1.0f)
             callback.onLogMessage("Flashing completed successfully in ${durationMs / 1000}s at %.2f MB/s".format(avgSpeed))
 
-            FlashEngineStrategy.StrategyResult(
+            StrategyResult(
                 success = true,
                 totalBytesWritten = totalWritten,
                 durationMs = durationMs,
                 averageSpeedMBps = avgSpeed,
-                sha256 = shaHex
+                sha256 = writtenShaHex
             )
         } catch (e: Exception) {
             callback.onLogMessage("Flash failed: ${e.message}")
-            FlashEngineStrategy.StrategyResult(
-                success = false,
-                totalBytesWritten = totalWritten,
-                durationMs = System.currentTimeMillis() - startTime,
-                averageSpeedMBps = 0.0,
-                sha256 = "",
-                errorMessage = e.message ?: "Unknown I/O error"
-            )
+            failureResult(e.message ?: "Unknown I/O error", startTime, totalWritten)
         } finally {
             ringBuffer.close()
             try { producerThread.join(2000) } catch (_: Exception) {}
         }
+    }
+
+    private fun failureResult(message: String, startTime: Long, totalWritten: Long = 0L): StrategyResult {
+        return StrategyResult(
+            success = false,
+            totalBytesWritten = totalWritten,
+            durationMs = System.currentTimeMillis() - startTime,
+            averageSpeedMBps = 0.0,
+            sha256 = "",
+            errorMessage = message
+        )
     }
 }

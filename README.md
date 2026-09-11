@@ -1,173 +1,208 @@
 # ⚡ FlashCore
 
-> **High-performance, non-root bootable USB creator for Android via USB OTG.**
+> **Non-root bootable USB creator for Android via USB OTG.**
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL_v3-blue.svg)](LICENSE)
+[![CI](https://github.com/ashishsinghbora/Flashcore/actions/workflows/ci.yml/badge.svg)](https://github.com/ashishsinghbora/Flashcore/actions/workflows/ci.yml)
 [![Platform](https://img.shields.io/badge/Platform-Android_8.0+-green.svg)](https://developer.android.com)
-[![Kotlin](https://img.shields.io/badge/Kotlin-2.0+-purple.svg)](https://kotlinlang.org)
-[![NDK](https://img.shields.io/badge/NDK-C%2B%2B17-orange.svg)](https://developer.android.com/ndk)
-[![Status](https://img.shields.io/badge/Status-Beta-brightgreen.svg)]()
+[![JDK](https://img.shields.io/badge/JDK-21-red.svg)](https://adoptium.net)
+[![Kotlin](https://img.shields.io/badge/Kotlin-2.2+-purple.svg)](https://kotlinlang.org)
+[![Tests](https://img.shields.io/badge/Tests-80%2B%20Passing-brightgreen.svg)]()
+[![Documentation](https://img.shields.io/badge/Docs-Architecture%20%7C%20Limitations-orange.svg)](ARCHITECTURE.md)
 
-**FlashCore** turns your Android phone into an emergency PC rescue toolkit. Format, flash, and create bootable USB media for **GNU/Linux, Windows 10/11 UEFI, and Ventoy Multi-Boot** directly over a USB OTG adapter — **no root privileges, external PCs, or cloud dependencies required.**
-
----
-
-## 📑 Table of Contents
-- [Key Features](#-key-features)
-- [Architecture & Tech Stack](#-architecture--tech-stack)
-- [How It Works](#-how-it-works)
-- [System Requirements](#-system-requirements)
-- [Project Structure](#-project-structure)
-- [Building from Source](#-building-from-source)
-- [Supported Formats & Images](#-supported-formats--images)
-- [Roadmap](#-roadmap)
-- [Contributing](#-contributing)
-- [License & Disclaimers](#-license--disclaimers)
+**FlashCore** is an Android utility designed to turn an Android device into a PC rescue toolkit. It communicates directly with USB flash drives over USB OTG using Android's USB Host API and raw SCSI Bulk-Only Transport (BOT) protocols — **without requiring root privileges.**
 
 ---
 
-## 🚀 Key Features
+## 🧭 The FlashCore Philosophy: Trustworthy over Feature-Rich
 
-* 🐧 **Linux Raw Hybrid Flasher:** Direct sector-by-sector raw streaming (`dd` equivalent) with chunked checksums for Arch Linux, Ubuntu, Fedora, Debian, Pop!_OS, Void Linux, and Raspberry Pi images.
-* 🪟 **Windows UEFI & Auto-WIM Splitter:**
-  * Auto-formats UEFI-compliant FAT32/NTFS partition structures.
-  * Native NDK bridge utilizing cross-compiled `wimlib` (C++17) to inspect `sources/install.wim` and automatically split files exceeding 4 GB into `.swm` chunks on the fly.
-* 🧰 **Ventoy Multi-Boot Engine:** Partition drives with the official Ventoy layout (VTOYEFI bootloader + exFAT storage) to store and boot multiple ISOs from a single flash drive.
-* ⚡ **Non-Root USB Mass Storage (SCSI BOT):** Communicates directly with USB flash drives using Android's USB Host API (`UsbManager` / `UsbEndpoint`) over raw SCSI Bulk-Only Transport protocols without requiring root or custom kernels.
-* 🔄 **High-Throughput Direct Ring Buffer:** Lock-free / Direct Memory allocation (`ByteBuffer.allocateDirect` / native pointers) for continuous producer-consumer I/O, preventing GC pauses and buffer stalls.
-* 🛡️ **Resilient Background Service:** Android 14+ compatible `ForegroundService` with `PARTIAL_WAKE_LOCK`, dynamic write-speed metering (MB/s), LBA progress tracking, and safe OTG unmount handling.
+Flashing operating systems over USB OTG is low-level, high-consequence systems programming. Corrupting a single sector or miscalculating partition alignment produces unbootable media or corrupts flash drives.
+
+FlashCore rejects the hype trap. We do **not** prioritize flashy graphs, network ISO downloads, SD cards, or AI features. 
+
+Our guiding principle is **evidence over claims**:
+> *"FlashCore safely writes an image to USB, handles disconnects, verifies every single block, has automated tests, and is validated across real USB devices."*
+
+### Engineering Priorities
+1. 🥇 **Correctness:** Bit-for-bit exactness in sector writing and verification.
+2. 🥈 **Safety:** Hardened disconnect handling (`ACTION_USB_DEVICE_DETACHED`) and target drive validation.
+3. 🥉 **Testability:** 100% of core logic runs offline via pure `BlockDevice` abstractions.
+4. **USB Reliability:** SCSI BOT stall recovery, retry loops, and sense error handling.
+5. **Block-Device Abstraction:** Zero coupling between UI/engines and Android hardware APIs.
+6. **Partition Correctness:** Strict GPT/MBR alignment, CRC32 checks, and protective structures.
+7. **Filesystem Correctness:** Fully conforming FAT32/ISO structures, directory records, and cluster maps.
+8. **Linux Flashing:** Production-grade hybrid streaming with bit-for-bit target read-back verification.
+9. **Windows Flashing:** UEFI FAT32 extraction and dynamic WIM chunking.
+10. **Ventoy:** Compliant multi-boot dual-partitioning and non-destructive updating.
+11. **Android UX:** Foreground service (`dataSync`), notification cancellation, process death persistence.
+12. **Performance Optimization:** Direct ring buffer decoupling and GC pause reduction.
+13. **Release Engineering:** Automated CI/CD, lint checks, test suites, reproducible builds, and signed releases.
 
 ---
 
-## 🛠️ Architecture & Tech Stack
+## 🏛️ System Architecture
+
+FlashCore enforces a strict downward dependency flow where UI components never speak to USB hardware directly:
 
 ```
-[ UI Layer (Jetpack Compose / Material 3 / Coroutines StateFlow) ]
-                               │
-[ Flasher State Machine (FSM) & Strategy Engine ]
-      ┌────────────────────────┼────────────────────────┐
-      ▼                        ▼                        ▼
-[ LinuxRawDdStrategy ]   [ WindowsUefiStrategy ]  [ VentoyStrategy ]
-      │                        │ (wimlib JNI)           │
-      └────────────────────────┼────────────────────────┘
-                               ▼
-            [ High-Throughput Direct Ring Buffer ]
-                               │
-            [ Non-Root SCSI BOT USB Controller ]
-                               │
-                  [ USB OTG Flash Drive ]
+                         FlashCore
+                            │
+                    ┌───────┴────────┐
+                    │                │
+                 UI/API          Flash Engine
+                                      │
+                              Strategy Interface
+                                      │
+              ┌───────────────────────┼──────────────────────┐
+              │                       │                      │
+           Linux                   Windows                Ventoy
+              │                       │                      │
+              └───────────────────────┼──────────────────────┘
+                                      │
+                              Filesystem Layer
+                                      │
+                         ┌────────────┴────────────┐
+                         │                         │
+                      ISO9660                   FAT32
+                         │                         │
+                         └────────────┬────────────┘
+                                      │
+                              Partition Layer
+                                      │
+                              GPT / MBR / etc.
+                                      │
+                               Block Device API
+                                      │
+                              ┌───────┴────────┐
+                              │                │
+                         USB/SCSI BOT       Test Device
+                              │
+                        USB Mass Storage
+                              │
+                          Physical USB
 ```
 
-| Subsystem | Technology / Library | Purpose |
-| :--- | :--- | :--- |
-| **UI & Presentation** | Jetpack Compose + Material 3 | Modern, dark-mode-first reactive UI with live progress graphs |
-| **Concurrency & Lifecycle**| Kotlin Coroutines + Flow + WorkManager | Background execution and UI state synchronization |
-| **USB Communication** | Android USB Host API + Custom SCSI Engine | Raw sector I/O via Bulk-Only Transport (BOT) |
-| **Native Processing** | Android NDK + C++17 + CMake | High-speed byte streaming and memory mapping (`mmap`) |
-| **WIM Splitting** | `wimlib` (cross-compiled for Android) | Windows ISO extraction and `.swm` chunking |
-| **Data Integrity** | Rolling SHA-256 / MurmurHash3 | Real-time block checksumming and sector validation |
+For complete technical specifications, review [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---
 
-## ⚙️ How It Works
+## 📊 Feature Status Matrix
 
-1. **Device Enumeration:** The app detects an OTG-connected USB drive and requests user permission via `android.hardware.usb.UsbManager`.
-2. **SCSI Handshake:** Negotiates logical block addressing (LBA) and sector sizing (512B vs. 4096B) using `INQUIRY` and `READ_CAPACITY_10/16` SCSI commands.
-3. **Flashing Pipeline:**
-   - **Linux Mode:** The ISO file is opened in streaming mode and pushed into a native Direct Ring Buffer, sending `WRITE_10` SCSI command blocks directly to Sector 0.
-   - **Windows Mode:** Partitions the drive, formats FAT32, mounts ISO filesystem structures, extracts boot files, and passes `install.wim` to `wimlib` to split into `<4 GB` chunks.
-   - **Ventoy Mode:** Writes the master boot record (MBR) and VTOYEFI partition images, formatting the remainder as an accessible exFAT data partition.
+| Component | Status | Details |
+| :--- | :---: | :--- |
+| **Linux Hybrid (Raw DD)** | 🟢 **Production-Grade** | 8-stage pipeline: validation, checksum pre-flight, raw streaming, cache flush (`SYNCHRONIZE_CACHE_10`), and bit-for-bit target read-back verification (`FlashVerifier`). |
+| **Windows UEFI Flasher** | 🟡 **Engine Implemented** | Dynamic capability detection (x64/ARM64/IA32), WIM/SWM chunking, FAT32 cluster writing, BCD/bootloader provisioning, and binary PE verification. Physical PC firmware testing ongoing. |
+| **Ventoy Multi-Boot Engine** | 🟡 **Engine Implemented** | Dual-partition MBR/GPT layout, 32 MB VTOYEFI asset provider, FAT32 data volume, filesystem ISO storage, and non-destructive update. Physical PC firmware testing ongoing. |
+| **Non-Root USB Mass Storage Driver** | 🟢 **Production-Grade** | SCSI Bulk-Only Transport (BOT) via Android `UsbManager` (CBW, CSW, INQUIRY, READ_CAPACITY_10/16, READ_10/16, WRITE_10/16). |
+| **Target Read-Back Verification** | 🟢 **Production-Grade** | Real bit-for-bit physical sector read-back pass (`FlashVerifier`) with exact LBA error pinpointing and dual SHA-256 validation. |
+| **Block Device Test Framework** | 🟢 **Production-Grade** | In-memory sparse, file-backed, and fault-injecting block devices with 80+ automated offline unit tests (`./gradlew test`). |
+| **FAT32 Filesystem Writer** | 🟢 **Production-Grade** | Full cluster allocator, directory parser, VBR/FSInfo writer, mkdir, createFile, and streaming file writer (`Fat32Writer`). |
+| **ISO Filesystem Engine** | 🟢 **Production-Grade** | ISO 9660 & Joliet volume descriptor parser, directory tree reader, and streaming file extractor (`IsoFilesystemReader`). |
+| **Android Production Engineering** | 🟢 **Production-Grade** | ForegroundService (`dataSync`), user cancellation action, `SavedStateHandle` process death recovery, OTG disconnect handling, persistable SAF URIs, and 1GB–64GB benchmarking suite. |
+| **SPSC Direct Ring Buffer** | 🟢 **Production-Grade** | Off-heap `ByteBuffer.allocateDirect` circular buffer for producer-consumer I/O rate decoupling. |
+
+See [`LIMITATIONS.md`](LIMITATIONS.md) for transparent hardware boundaries and firmware considerations.
+
+---
+
+## 📂 Multi-Module Roadmap & Package Namespace
+
+To ensure long-term maintainability, the project is structured to transition from a single application module into modular subprojects with a clean domain namespace:
+
+```text
+flashcore/
+├── app/                        # Android UI, ViewModels, Compose, ForegroundService
+├── core/
+│   ├── blockdevice/            # BlockDevice interface, Memory & Fault-injecting devices
+│   ├── scsi/                   # CBW/CSW protocol, SCSI command builder, sense parser
+│   ├── usb/                    # UsbMassStorageDriver, Android UsbManager host driver
+│   ├── partition/              # MBR, GPT, GUIDs, CRC32 builders
+│   ├── filesystem/             # FAT32 formatter, cluster allocator, directory parser
+│   ├── iso/                    # ISO 9660, Joliet, El Torito parser and extractor
+│   └── verification/           # FlashVerifier, checksum engines, read-back validators
+├── flashers/
+│   ├── linux/                  # LinuxRawDdStrategy and hybrid verification
+│   ├── windows/                # WindowsUefiStrategy, WIM splitter, BCD generator
+│   └── ventoy/                 # VentoyStrategy, dual-partition installer, update engine
+├── native/                     # (Optional future) C++17 accelerated routines / wimlib
+└── test/                       # Shared fixtures, test images, hardware test harnesses
+```
+
+> **Namespace Migration:** Legacy internal packages under `com.example.*` are being migrated to `com.ashishsinghbora.flashcore` across modules to reflect production-grade project ownership.
 
 ---
 
 ## 📱 System Requirements
 
-* **Android Version:** Android 8.0 (API Level 26) or higher.
+* **Android Version:** Android 8.0 (API Level 26) or higher (tested up to Android 15 / API 36).
 * **Hardware:** USB On-The-Go (OTG) support.
-* **Accessories:** USB Type-C / Micro-USB OTG adapter + USB Flash Drive (8 GB+ recommended).
-* **Root Required:** **No.** Operates entirely via standard Android USB Host permissions.
+* **Accessories:** USB Type-C or Micro-USB OTG adapter + USB flash drive.
+* **Root Privileges:** **None.** Operates entirely within standard Android user-space USB Host permissions.
 
 ---
 
-## 📂 Project Structure
-
-```text
-FlashCore/
-├── app/                      # Application entry point & Manifest
-├── core-usb/                 # USB Host API & SCSI BOT communication
-│   ├── scsi/                 # CommandBlockWrapper, CommandStatusWrapper, CDB Builders
-│   ├── driver/               # UsbMassStorageDriver implementation
-│   └── buffer/               # DirectByteBuffer Concurrent Ring Buffer
-├── core-flasher/             # Strategy pattern & state machine logic
-│   ├── fsm/                  # FlasherStateMachine & Lifecycle events
-│   └── strategies/           # Linux, Windows UEFI, and Ventoy flashers
-├── core-native/              # C++ NDK Layer
-│   ├── CMakeLists.txt        # Native build definitions
-│   ├── cpp/                  # JNI bindings for sector writes and mmap
-│   └── third_party/          # Cross-compiled wimlib source
-└── feature-ui/               # Jetpack Compose screens, ViewModels, and navigation
-```
-
----
-
-## 🔨 Building from Source
+## 🔨 Building and Testing from Source
 
 ### Prerequisites
-1. **Android Studio Ladybug (or newer)**
-2. **Android SDK & NDK** (NDK version `r26b` or higher)
-3. **CMake** (3.22.1+)
-4. **JDK 17 or 21**
+1. **JDK 21** (Eclipse Temurin recommended)
+2. **Android SDK Platform API 36**
+3. **Android Build Tools 36.0.0+**
 
-### Clone & Build
+### Local Verification Pipeline
+Before submitting code, run the standard quality verification pipeline:
+
 ```bash
-# Clone the repository recursively (including submodules)
-git clone --recursive https://github.com/your-username/FlashCore.git
-cd FlashCore
+# 1. Run Android Lint
+./gradlew lint
 
-# Build the native NDK libraries and assemble Debug APK
+# 2. Run automated test suite (80+ unit and Robolectric tests)
+./gradlew test
+
+# 3. Assemble Debug APK
 ./gradlew assembleDebug
 
-# Install to connected device via ADB
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+# 4. Assemble Release APK
+./gradlew assembleRelease
 ```
 
 ---
 
-## 💿 Supported Formats & Images
+## 🔄 Reproducible Builds & Verification
 
-* **GNU/Linux:** Ubuntu, Arch Linux, Fedora, Debian, Linux Mint, Kali Linux, Manjaro, Pop!_OS, Alpine, Void Linux, Raspberry Pi OS.
-* **Microsoft Windows:** Windows 11, Windows 10, Windows Server (UEFI-bootable ISOs).
-* **Rescue & Utility:** Ventoy, MemTest86, Clonezilla, SystemRescue, GParted Live.
+FlashCore supports deterministic, reproducible builds. Anyone building the source code with the reference toolchain can reproduce bit-for-bit identical release APKs.
 
----
+Every official GitHub Release includes:
+- Signed Release APK (`flashcore-vX.Y.Z-release.apk`)
+- SHA-256 Checksums (`SHA256SUMS.txt`)
 
-## 🗺️ Roadmap
+To verify the integrity of a downloaded release:
+```bash
+sha256sum -c SHA256SUMS.txt
+```
 
-- [x] Non-root SCSI BOT mass storage sector writer.
-- [x] Raw hybrid Linux ISO streaming with live throughput telemetry.
-- [x] Android NDK `wimlib` integration for Windows `install.wim` splitting.
-- [x] Ventoy multi-boot partition scaffolding.
-- [ ] Direct network ISO downloading directly to USB (bypassing phone internal storage).
-- [ ] SD Card / MicroSD adapter flashing support.
-- [ ] ISO hash / checksum auto-verifier against official distribution mirrors.
+Read [`REPRODUCIBLE_BUILDS.md`](REPRODUCIBLE_BUILDS.md) for full reproduction steps and `diffoscope` verification details.
 
 ---
 
 ## 🤝 Contributing
 
-Contributions, bug reports, and feature requests are welcome!
+Contributions, bug reports, and hardware compatibility reports are welcome! 
 
-1. Fork the Project.
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`).
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`).
-4. Push to the Branch (`git push origin feature/AmazingFeature`).
-5. Open a Pull Request.
+Please read our contributing guides before opening a PR:
+* 📘 [Contributor Guide (`CONTRIBUTING.md`)](CONTRIBUTING.md)
+* 🏛️ [Architecture Blueprint (`ARCHITECTURE.md`)](ARCHITECTURE.md)
+* ⚠️ [Technical Limitations (`LIMITATIONS.md`)](LIMITATIONS.md)
+* 🔒 [Security Policy (`SECURITY.md`)](SECURITY.md)
+* 📜 [Code of Conduct (`CODE_OF_CONDUCT.md`)](CODE_OF_CONDUCT.md)
 
 ---
 
-## ⚖️ License & Disclaimers
+## ⚖️ License & Attribution
 
 Distributed under the **GNU General Public License v3.0 (GPL-3.0)**. See [`LICENSE`](LICENSE) for details.
 
-* **Disclaimer:** Formatting a USB flash drive will permanently erase all existing data on the target storage device. Ensure proper drive selection before confirming operations. The developers are not responsible for accidental data loss.
-* *Windows is a registered trademark of Microsoft Corporation. Ventoy is an open-source project by longpanda.*
+### Third-Party Attribution
+* **Ventoy**: Copyright (C) 2019-2024 longpanda `<admin@ventoy.net>`. Licensed under GPL-3.0. Source code available at [https://github.com/ventoy/Ventoy](https://github.com/ventoy/Ventoy).
+* **GRUB2**: Copyright (C) Free Software Foundation, Inc. Licensed under GPL-3.0.
+* **Disclaimer**: FlashCore is an independent open-source implementation. It is not affiliated with, endorsed by, or sponsored by Microsoft, Canonical, or the Ventoy project.
+* **Data Loss Warning**: Flashing an image permanently overwrites existing data on the chosen USB device. Always confirm target drive capacity and serial numbers before proceeding.

@@ -2,15 +2,21 @@ package com.example
 
 import android.app.Application
 import android.content.Context
+import android.net.Uri
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.test.core.app.ApplicationProvider
+import com.example.block.MemoryBlockDevice
 import com.example.dsa.IsoTrieParser
+import com.example.flasher.FlashEngineStrategy
 import com.example.flasher.fsm.FlasherState
+import com.example.flasher.strategies.LinuxRawDdStrategy
 import com.example.ui.FlasherViewModel
 import com.example.ui.screens.MainFlasherScreen
 import com.example.ui.theme.FlashCoreTheme
+import com.example.usb.UsbDiskInfo
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -22,6 +28,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.ByteArrayInputStream
+import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
@@ -135,6 +142,80 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("image_inspector_card").assertExists()
         composeTestRule.onNodeWithTag("strategy_selector_card").assertExists()
         composeTestRule.onNodeWithTag("terminal_log_view").assertExists()
+    }
+
+    @Test
+    fun `LinuxRawDdStrategy writes correctly to MemoryBlockDevice`() = runTest {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val strategy = LinuxRawDdStrategy()
+        val memoryDevice = MemoryBlockDevice(totalSectors = 4096L, sectorSizeBytes = 512)
+
+        val diskInfo = UsbDiskInfo(
+            device = null,
+            vendorId = 0x1234,
+            productId = 0x5678,
+            manufacturerName = "FlashCore",
+            productName = "Virtual Disk",
+            vendorString = "FLASHCORE",
+            productString = "VIRTUAL_DISK",
+            revision = "1.0",
+            serialNumber = "VIRTUAL_001",
+            totalCapacityBytes = 4096L * 512L,
+            totalSectors = 4096L,
+            sectorSizeBytes = 512,
+            isRemovable = true,
+            isWriteProtected = false,
+            hasPermission = true
+        )
+
+        val isoFile = File(app.cacheDir, "test_ubuntu.iso")
+        val isoBytes = ByteArray(64 * 1024) { (it % 256).toByte() }
+        "CD001".toByteArray(Charsets.US_ASCII).copyInto(isoBytes, 16 * 2048 + 1)
+        isoFile.writeBytes(isoBytes)
+        val isoUri = Uri.fromFile(isoFile)
+
+        val analysis = IsoTrieParser.parse(
+            stream = isoFile.inputStream(),
+            totalSizeBytes = isoBytes.size.toLong(),
+            fileName = "ubuntu-24.04-desktop-amd64.iso"
+        )
+
+        val progressLogs = mutableListOf<String>()
+        val result = strategy.execute(
+            context = app,
+            device = memoryDevice,
+            targetDrive = diskInfo,
+            sourceUri = isoUri,
+            isoAnalysis = analysis,
+            config = FlashEngineStrategy.FlashConfig(blockSizeBytes = 512 * 1024),
+            callback = object : FlashEngineStrategy.ProgressCallback {
+                override fun onPartitionProgress(stage: String, progress: Float) {}
+                override fun onStreamProgress(
+                    writtenBytes: Long,
+                    totalBytes: Long,
+                    speedMBps: Double,
+                    etaSeconds: Long,
+                    bufferSaturation: Float,
+                    currentLba: Long,
+                    chunkIndex: Int,
+                    totalChunks: Int
+                ) {}
+                override fun onVerificationProgress(verifiedBytes: Long, totalBytes: Long, isMatching: Boolean) {}
+                override fun onLogMessage(message: String) { progressLogs.add(message) }
+            },
+            isCancelled = { false }
+        )
+
+        assertTrue(result.success)
+        assertEquals(isoBytes.size.toLong(), result.totalBytesWritten)
+        assertTrue(memoryDevice.flushCount > 0)
+        assertTrue(memoryDevice.writeCount > 0)
+
+        // Verify sector 0 byte content matches source ISO exactly
+        val readSector0 = ByteArray(512)
+        memoryDevice.read(0L, 1, readSector0)
+        val expectedSector0 = isoBytes.copyOfRange(0, 512)
+        assertArrayEquals(expectedSector0, readSector0)
     }
 }
 

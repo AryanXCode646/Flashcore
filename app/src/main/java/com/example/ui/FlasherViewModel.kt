@@ -12,7 +12,9 @@ import android.net.Uri
 import android.os.Build
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
+import com.example.block.DeviceDisconnectedException
 import com.example.dsa.IsoTrieParser
 import com.example.flasher.FlashEngineStrategy
 import com.example.flasher.fsm.FlasherEvent
@@ -55,11 +57,17 @@ data class FlasherUiState(
     val activeBlocks: List<Int> = List(64) { 0 } // 0=pending, 1=writing, 2=done
 )
 
-class FlasherViewModel(application: Application) : AndroidViewModel(application) {
+class FlasherViewModel(
+    application: Application,
+    private val savedStateHandle: SavedStateHandle = SavedStateHandle()
+) : AndroidViewModel(application) {
 
     companion object {
         private const val TAG = "FlasherViewModel"
         const val ACTION_USB_PERMISSION = "com.example.USB_PERMISSION"
+        private const val KEY_SAVED_STRATEGY = "saved_strategy_id"
+        private const val KEY_SAVED_ISO_URI = "saved_iso_uri"
+        private const val KEY_SAVED_ISO_NAME = "saved_iso_name"
     }
 
     private val usbManager = application.getSystemService(Context.USB_SERVICE) as UsbManager
@@ -93,7 +101,26 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
                 }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     addLog("USB Hardware Event: OTG Flash Drive Detached")
-                    refreshDevices()
+                    val detachedDevice: UsbDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                    }
+
+                    val currentDevice = _uiState.value.selectedDevice?.device
+                    val isCurrentDeviceDetached = (detachedDevice != null && currentDevice != null &&
+                            detachedDevice.deviceName == currentDevice.deviceName) ||
+                            (currentDevice != null && !usbManager.deviceList.containsKey(currentDevice.deviceName))
+
+                    if (_uiState.value.isFlashing && isCurrentDeviceDetached) {
+                        handleDeviceDetachedDuringFlash()
+                    } else {
+                        if (isCurrentDeviceDetached) {
+                            _uiState.update { it.copy(selectedDevice = null) }
+                        }
+                        refreshDevices()
+                    }
                 }
                 ACTION_USB_PERMISSION -> {
                     synchronized(this) {
@@ -124,7 +151,31 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
             addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
             addAction(ACTION_USB_PERMISSION)
         }
-        application.registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            application.registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            application.registerReceiver(usbReceiver, filter)
+        }
+
+        // Restore state across process death / configuration changes
+        val savedStrategy = savedStateHandle.get<String>(KEY_SAVED_STRATEGY)
+        val savedUriStr = savedStateHandle.get<String>(KEY_SAVED_ISO_URI)
+        val savedName = savedStateHandle.get<String>(KEY_SAVED_ISO_NAME)
+        if (savedStrategy != null || savedUriStr != null) {
+            _uiState.update {
+                it.copy(
+                    selectedStrategyId = savedStrategy ?: it.selectedStrategyId,
+                    selectedIsoUri = savedUriStr?.let { s -> Uri.parse(s) },
+                    selectedIsoName = savedName ?: it.selectedIsoName
+                )
+            }
+        }
+
+        // Register foreground service cancellation hook
+        FlashForegroundService.onCancelActionRequested = {
+            cancelFlashing()
+        }
 
         addLog("FlashCore Subsystem Initialized. Scanning for connected USB OTG storage drives...")
         refreshDevices()
@@ -192,11 +243,19 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
             return
         }
         val context = getApplication<Application>()
+        val permIntent = Intent(ACTION_USB_PERMISSION).apply {
+            setPackage(context.packageName)
+        }
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
         val permissionIntent = PendingIntent.getBroadcast(
             context,
             0,
-            Intent(ACTION_USB_PERMISSION),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+            permIntent,
+            flags
         )
         addLog("Requesting USB OS Permission for ${device.displayName}...")
         usbManager.requestPermission(dev, permissionIntent)
@@ -214,6 +273,7 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun selectStrategy(strategyId: String) {
+        savedStateHandle[KEY_SAVED_STRATEGY] = strategyId
         _uiState.update { it.copy(selectedStrategyId = strategyId) }
         addLog("Switched Flashing Engine to: $strategyId")
     }
@@ -229,6 +289,15 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
 
             try {
                 val context = getApplication<Application>()
+                try {
+                    val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    context.contentResolver.takePersistableUriPermission(uri, takeFlags)
+                    addLog("Persistable SAF URI permission acquired for $displayName")
+                } catch (_: Exception) {}
+
+                savedStateHandle[KEY_SAVED_ISO_URI] = uri.toString()
+                savedStateHandle[KEY_SAVED_ISO_NAME] = displayName
+
                 var totalSize = 0L
                 context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
                     totalSize = pfd.statSize
@@ -340,12 +409,24 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
             try {
                 driver.open()
             } catch (e: Exception) {
-                addLog("Note: Running in Direct Storage Pipeline mode.")
+                val errorMsg = "Failed to initialize USB driver: ${e.message}"
+                addLog("ERROR: $errorMsg")
+                fsm.transition(
+                    FlasherEvent.FlashErrorOccurred(
+                        device = target,
+                        errorMessage = errorMsg,
+                        canRetry = true,
+                        failedLba = 0L
+                    )
+                )
+                _uiState.update { it.copy(isFlashing = false, fsmState = fsm.state.value) }
+                FlashForegroundService.stopService(context)
+                return@launch
             }
 
             val result = strategy.execute(
                 context = context,
-                driver = driver,
+                device = driver,
                 targetDrive = target,
                 sourceUri = sourceUri,
                 isoAnalysis = analysis,
@@ -355,6 +436,7 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
                         fsm.transition(FlasherEvent.PartitionProgressUpdate(target, stage, progress))
                         _uiState.update { it.copy(fsmState = fsm.state.value) }
                         addLog("[Partition] $stage (%.0f%%)".format(progress * 100))
+                        FlashForegroundService.update(stage, (progress * 100).toInt(), 0.0, 0L)
                     }
 
                     override fun onStreamProgress(
@@ -392,6 +474,9 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
                             }
                         }
 
+                        val pct = (progressFraction * 100).toInt()
+                        FlashForegroundService.update("Writing OS payload...", pct, speedMBps, etaSeconds)
+
                         _uiState.update {
                             val newHistory = (it.speedHistory + speedMBps).takeLast(30)
                             it.copy(
@@ -407,6 +492,8 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
                             FlasherEvent.VerificationProgressUpdate(target, verifiedBytes, totalBytes, isMatching)
                         )
                         _uiState.update { it.copy(fsmState = fsm.state.value) }
+                        val vPct = if (totalBytes > 0) ((verifiedBytes.toDouble() / totalBytes.toDouble()) * 100).toInt() else 0
+                        FlashForegroundService.update("Verifying sectors...", vPct, 0.0, 0L)
                     }
 
                     override fun onLogMessage(message: String) {
@@ -416,8 +503,7 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
                 isCancelled = { isCancelledFlag }
             )
 
-            driver.close()
-            FlashForegroundService.stopService(context)
+            try { driver.close() } catch (_: Exception) {}
 
             if (result.success) {
                 fsm.transition(
@@ -437,6 +523,7 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
                     )
                 }
                 addLog("FLASH COMPLETED SUCCESSFULLY: ${result.totalBytesWritten / (1024 * 1024)} MB in ${result.durationMs / 1000}s (SHA256: ${result.sha256.take(12)}...)")
+                FlashForegroundService.complete("Flash Succeeded", "Bootable USB created and verified successfully!", true)
             } else {
                 fsm.transition(
                     FlasherEvent.FlashErrorOccurred(
@@ -453,16 +540,89 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
                     )
                 }
                 addLog("FLASH FAILED: ${result.errorMessage}")
+                FlashForegroundService.complete("Flash Failed", result.errorMessage ?: "Flash failed", false)
             }
         }
     }
 
+    private fun handleDeviceDetachedDuringFlash() {
+        isCancelledFlag = true
+        activeFlashJob?.cancel()
+        val target = _uiState.value.selectedDevice
+        val errorMsg = "USB drive disconnected or suffered OTG power loss during active write operation"
+        addLog("FATAL: $errorMsg")
+        fsm.transition(
+            FlasherEvent.FlashErrorOccurred(
+                device = target ?: UsbDiskInfo(
+                    device = null,
+                    vendorId = 0,
+                    productId = 0,
+                    manufacturerName = "",
+                    productName = "Disconnected Drive",
+                    vendorString = "",
+                    productString = "",
+                    revision = "",
+                    serialNumber = "",
+                    totalCapacityBytes = 0L,
+                    totalSectors = 0L,
+                    sectorSizeBytes = 512,
+                    isRemovable = true,
+                    isWriteProtected = false,
+                    hasPermission = false
+                ),
+                errorMessage = errorMsg,
+                canRetry = false,
+                failedLba = 0L
+            )
+        )
+        _uiState.update {
+            it.copy(
+                isFlashing = false,
+                selectedDevice = null,
+                fsmState = fsm.state.value
+            )
+        }
+        FlashForegroundService.complete("Flash Aborted", "USB drive was disconnected during flashing", false)
+        refreshDevices()
+    }
+
     fun cancelFlashing() {
+        if (!_uiState.value.isFlashing && !isCancelledFlag) return
         isCancelledFlag = true
         activeFlashJob?.cancel()
         addLog("Flash cancellation requested by user...")
-        _uiState.update { it.copy(isFlashing = false) }
-        FlashForegroundService.stopService(getApplication())
+        val currentDev = _uiState.value.selectedDevice
+        if (currentDev != null) {
+            fsm.transition(
+                FlasherEvent.FlashErrorOccurred(
+                    device = currentDev,
+                    errorMessage = "Operation cancelled by user",
+                    canRetry = true,
+                    failedLba = 0L
+                )
+            )
+        }
+        _uiState.update {
+            it.copy(
+                isFlashing = false,
+                fsmState = FlasherState.ErrorRecovery(
+                    device = currentDev,
+                    errorMessage = "Operation cancelled by user",
+                    canRetry = true,
+                    lastFailedLba = 0L,
+                    previousState = "Streaming"
+                )
+            )
+        }
+        FlashForegroundService.complete("Flash Cancelled", "Operation cancelled by user", false)
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        try {
+            getApplication<Application>().unregisterReceiver(usbReceiver)
+        } catch (_: Exception) {}
+        FlashForegroundService.onCancelActionRequested = null
     }
 
     fun resetSession() {
@@ -497,39 +657,12 @@ class FlasherViewModel(application: Application) : AndroidViewModel(application)
             productString = device.productName ?: "OTG Flash Drive",
             revision = "1.0",
             serialNumber = device.serialNumber ?: "DEV_${device.deviceId}",
-            totalCapacityBytes = 32L * 1024L * 1024L * 1024L, // 32 GB default
-            totalSectors = 62914560L,
+            totalCapacityBytes = 0L, // Capacity unknown until queried via SCSI
+            totalSectors = 0L,
             sectorSizeBytes = 512,
             isRemovable = true,
             isWriteProtected = false,
             hasPermission = hasPerm
         )
-    }
-
-    private fun createVirtualTargetDrive(): UsbDiskInfo {
-        return UsbDiskInfo(
-            device = null,
-            vendorId = 0x0951,
-            productId = 0x1666,
-            manufacturerName = "Kingston",
-            productName = "DataTraveler 3.0 OTG",
-            vendorString = "Kingston",
-            productString = "DataTraveler 3.0",
-            revision = "PMAP",
-            serialNumber = "001A92B45F12",
-            totalCapacityBytes = 64L * 1024L * 1024L * 1024L, // 64 GB
-            totalSectors = 125829120L,
-            sectorSizeBytes = 512,
-            isRemovable = true,
-            isWriteProtected = false,
-            hasPermission = true
-        )
-    }
-
-    override fun onCleared() {
-        super.onCleared()
-        try {
-            getApplication<Application>().unregisterReceiver(usbReceiver)
-        } catch (_: Exception) {}
     }
 }

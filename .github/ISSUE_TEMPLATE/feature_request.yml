@@ -1,0 +1,48 @@
+name: 💡 Feature Request
+description: Suggest an idea or architectural improvement for FlashCore
+title: "[FEATURE] <concise description>"
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting a feature for FlashCore!
+        Please review [`ARCHITECTURE.md`](https://github.com/ashishsinghbora/Flashcore/blob/main/ARCHITECTURE.md) to understand our architectural layers and priorities (Correctness > Safety > Testability > USB reliability > Feature richness).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: Is your feature request related to a specific problem or gap?
+      placeholder: I am frustrated when...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: Proposed Solution / Enhancement
+      description: Detailed description of what you want to happen.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: impacted_layer
+    attributes:
+      label: Architectural Layer Impacted
+      options:
+        - "Hardware / SCSI BOT Transport Layer"
+        - "Block Device Layer"
+        - "Partition Engine Layer"
+        - "Filesystem Layer (ISO/FAT32)"
+        - "Flashing Strategy Engine"
+        - "Android UI / Service / Telemetry"
+        - "Build / CI / Release Engineering"
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Clear description of any alternative solutions or features you considered.

@@ -20,6 +20,8 @@ object ScsiCdbBuilder {
     const val OP_READ_10: Byte = 0x28
     const val OP_WRITE_10: Byte = 0x2A
     const val OP_SYNCHRONIZE_CACHE_10: Byte = 0x35
+    const val OP_READ_16: Byte = 0x88.toByte()
+    const val OP_WRITE_16: Byte = 0x8A.toByte()
     const val OP_READ_CAPACITY_16: Byte = 0x9E.toByte()
 
     /**
@@ -132,6 +134,56 @@ object ScsiCdbBuilder {
         // 16-bit Transfer Block Count in Big-Endian
         cdb[7] = ((blockCount shr 8) and 0xFF).toByte()
         cdb[8] = (blockCount and 0xFF).toByte()
+
+        return cdb
+    }
+
+    /**
+     * Builds READ_16 CDB (16 bytes).
+     * Reads [blockCount] sectors starting at 64-bit [lba].
+     */
+    fun read16(lba: Long, blockCount: Long, lun: Byte = 0): ByteArray {
+        require(lba >= 0) { "LBA must be non-negative for READ_16: $lba" }
+        require(blockCount in 1..0xFFFFFFFFL) { "Block count out of 32-bit range: $blockCount" }
+
+        val cdb = ByteArray(16)
+        cdb[0] = OP_READ_16
+        cdb[1] = ((lun.toInt() and 0x07) shl 5).toByte()
+
+        // 64-bit LBA in Big-Endian
+        for (i in 0..7) {
+            cdb[2 + i] = ((lba ushr ((7 - i) * 8)) and 0xFF).toByte()
+        }
+
+        // 32-bit Transfer Length in Big-Endian
+        for (i in 0..3) {
+            cdb[10 + i] = ((blockCount ushr ((3 - i) * 8)) and 0xFF).toByte()
+        }
+
+        return cdb
+    }
+
+    /**
+     * Builds WRITE_16 CDB (16 bytes).
+     * Writes [blockCount] sectors starting at 64-bit [lba].
+     */
+    fun write16(lba: Long, blockCount: Long, lun: Byte = 0): ByteArray {
+        require(lba >= 0) { "LBA must be non-negative for WRITE_16: $lba" }
+        require(blockCount in 1..0xFFFFFFFFL) { "Block count out of 32-bit range: $blockCount" }
+
+        val cdb = ByteArray(16)
+        cdb[0] = OP_WRITE_16
+        cdb[1] = ((lun.toInt() and 0x07) shl 5).toByte()
+
+        // 64-bit LBA in Big-Endian
+        for (i in 0..7) {
+            cdb[2 + i] = ((lba ushr ((7 - i) * 8)) and 0xFF).toByte()
+        }
+
+        // 32-bit Transfer Length in Big-Endian
+        for (i in 0..3) {
+            cdb[10 + i] = ((blockCount ushr ((3 - i) * 8)) and 0xFF).toByte()
+        }
 
         return cdb
     }
@@ -296,6 +348,36 @@ object ScsiCdbBuilder {
             additionalSenseCode = asc,
             additionalSenseCodeQualifier = ascq,
             ascDescription = ascDesc
+        )
+    }
+
+    data class ModeSenseResponse(
+        val modeDataLength: Int,
+        val mediumType: Int,
+        val isWriteProtected: Boolean,
+        val blockDescriptorLength: Int
+    )
+
+    fun parseModeSense6(data: ByteArray): ModeSenseResponse {
+        if (data.size < 4) {
+            return ModeSenseResponse(
+                modeDataLength = 0,
+                mediumType = 0,
+                isWriteProtected = false,
+                blockDescriptorLength = 0
+            )
+        }
+        val length = data[0].toInt() and 0xFF
+        val mediumType = data[1].toInt() and 0xFF
+        val deviceSpecific = data[2].toInt() and 0xFF
+        val isWriteProtected = (deviceSpecific and 0x80) != 0
+        val blockDescLen = data[3].toInt() and 0xFF
+
+        return ModeSenseResponse(
+            modeDataLength = length,
+            mediumType = mediumType,
+            isWriteProtected = isWriteProtected,
+            blockDescriptorLength = blockDescLen
         )
     }
 }

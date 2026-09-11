@@ -7,26 +7,32 @@ import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.util.Log
+import com.example.block.BlockDevice
+import com.example.block.DeviceCapacity
+import com.example.block.DeviceDisconnectedException
 import com.example.scsi.CommandBlockWrapper
 import com.example.scsi.CommandStatusWrapper
 import com.example.scsi.ScsiCdbBuilder
-import java.io.Closeable
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 /**
  * Low-Level Non-Root USB Mass Storage SCSI Bulk-Only Transport (BOT) Driver.
  *
  * Communicates directly with USB Flash drives via Android's UsbManager without root privileges.
  * Manages raw SCSI Command Block Wrappers (CBW), data phases, Command Status Wrappers (CSW),
- * automated clear-halt stall recovery, and exponential backoff retries.
+ * automated clear-halt stall recovery, BOMSR resets, partial transfer loops, and 16-byte CDBs.
+ *
+ * Implements [BlockDevice] to allow strategy engines to access USB storage via a uniform abstraction.
  */
 class UsbMassStorageDriver(
     private val usbManager: UsbManager,
     val device: UsbDevice?
-) : Closeable {
+) : BlockDevice {
 
     companion object {
         private const val TAG = "UsbMassStorageDriver"
@@ -50,11 +56,30 @@ class UsbMassStorageDriver(
     var diskInfo: UsbDiskInfo? = null
         private set
 
+    override val isConnected: Boolean
+        get() {
+            val dev = device
+            return connection != null && (dev == null || usbManager.deviceList.containsKey(dev.deviceName))
+        }
+
+    override val sectorSizeBytes: Int
+        get() = diskInfo?.sectorSizeBytes ?: 512
+
+    /**
+     * Checks if physical USB device is still registered with Android USB subsystem.
+     */
+    private fun checkDeviceConnected() {
+        val dev = device ?: return
+        if (!usbManager.deviceList.containsKey(dev.deviceName)) {
+            throw DeviceDisconnectedException("USB device ${dev.deviceName} has been disconnected")
+        }
+    }
+
     /**
      * Finds the Mass Storage Interface and endpoints on the device.
      */
     fun initDriver(): Boolean {
-        val dev = device ?: return true
+        val dev = device ?: return false
         for (i in 0 until dev.interfaceCount) {
             val iface = dev.getInterface(i)
             if (iface.interfaceClass == USB_CLASS_MASS_STORAGE) {
@@ -89,23 +114,7 @@ class UsbMassStorageDriver(
     @Throws(IOException::class)
     fun open(): UsbDiskInfo {
         ioLock.withLock {
-            val dev = device ?: return UsbDiskInfo(
-                device = null,
-                vendorId = 0x0951,
-                productId = 0x1666,
-                manufacturerName = "Kingston",
-                productName = "DataTraveler 3.0 OTG",
-                vendorString = "Kingston",
-                productString = "DataTraveler 3.0",
-                revision = "PMAP",
-                serialNumber = "001A92B45F12",
-                totalCapacityBytes = 64L * 1024L * 1024L * 1024L,
-                totalSectors = 125829120L,
-                sectorSizeBytes = 512,
-                isRemovable = true,
-                isWriteProtected = false,
-                hasPermission = true
-            ).also { diskInfo = it }
+            val dev = device ?: throw IOException("Cannot open USB driver: No UsbDevice provided")
 
             if (!usbManager.hasPermission(dev)) {
                 throw SecurityException("USB Permission not granted for ${dev.deviceName}")
@@ -142,6 +151,7 @@ class UsbMassStorageDriver(
 
             val inquiry = inquiry()
             val capacity = readCapacity()
+            val modeSense = modeSense()
 
             val info = UsbDiskInfo(
                 device = dev,
@@ -157,12 +167,84 @@ class UsbMassStorageDriver(
                 totalSectors = capacity.maxLba + 1L,
                 sectorSizeBytes = capacity.blockSizeBytes,
                 isRemovable = inquiry.isRemovable,
-                isWriteProtected = false,
+                isWriteProtected = modeSense.isWriteProtected,
                 hasPermission = true
             )
             diskInfo = info
             return info
         }
+    }
+
+    /**
+     * Loops over bulkTransfer IN to ensure partial packets are completely read.
+     */
+    private fun bulkTransferInAll(
+        conn: UsbDeviceConnection,
+        ep: UsbEndpoint,
+        buffer: ByteArray,
+        offset: Int,
+        length: Int,
+        timeoutMs: Int
+    ): Int {
+        checkDeviceConnected()
+        var transferred = 0
+        val startTime = System.currentTimeMillis()
+        while (transferred < length) {
+            val remaining = length - transferred
+            val elapsed = (System.currentTimeMillis() - startTime).toInt()
+            val remainingTimeout = (timeoutMs - elapsed).coerceAtLeast(1)
+            if (elapsed >= timeoutMs) {
+                Log.w(TAG, "bulkTransferIn timed out after ${elapsed}ms (transferred $transferred/$length bytes)")
+                return if (transferred > 0) transferred else -1
+            }
+            val res = conn.bulkTransfer(ep, buffer, offset + transferred, remaining, remainingTimeout)
+            if (res < 0) {
+                checkDeviceConnected()
+                return if (transferred > 0) transferred else res
+            }
+            if (res == 0) {
+                Thread.sleep(1)
+            } else {
+                transferred += res
+            }
+        }
+        return transferred
+    }
+
+    /**
+     * Loops over bulkTransfer OUT to ensure partial packets are completely written.
+     */
+    private fun bulkTransferOutAll(
+        conn: UsbDeviceConnection,
+        ep: UsbEndpoint,
+        buffer: ByteArray,
+        offset: Int,
+        length: Int,
+        timeoutMs: Int
+    ): Int {
+        checkDeviceConnected()
+        var transferred = 0
+        val startTime = System.currentTimeMillis()
+        while (transferred < length) {
+            val remaining = length - transferred
+            val elapsed = (System.currentTimeMillis() - startTime).toInt()
+            val remainingTimeout = (timeoutMs - elapsed).coerceAtLeast(1)
+            if (elapsed >= timeoutMs) {
+                Log.w(TAG, "bulkTransferOut timed out after ${elapsed}ms (transferred $transferred/$length bytes)")
+                return if (transferred > 0) transferred else -1
+            }
+            val res = conn.bulkTransfer(ep, buffer, offset + transferred, remaining, remainingTimeout)
+            if (res < 0) {
+                checkDeviceConnected()
+                return if (transferred > 0) transferred else res
+            }
+            if (res == 0) {
+                Thread.sleep(1)
+            } else {
+                transferred += res
+            }
+        }
+        return transferred
     }
 
     /**
@@ -174,9 +256,11 @@ class UsbMassStorageDriver(
         dataBuffer: ByteArray?,
         dataOffset: Int = 0,
         dataLength: Int = 0,
-        timeoutMs: Int = DEFAULT_TIMEOUT_MS
+        timeoutMs: Int = DEFAULT_TIMEOUT_MS,
+        autoRequestSense: Boolean = true
     ): CommandStatusWrapper {
-        val conn = connection ?: throw IOException("USB Driver is not connected")
+        checkDeviceConnected()
+        val conn = connection ?: throw DeviceDisconnectedException("USB Driver is not connected")
         val outEp = outEndpoint ?: throw IOException("OUT Endpoint unavailable")
         val inEp = inEndpoint ?: throw IOException("IN Endpoint unavailable")
 
@@ -184,6 +268,8 @@ class UsbMassStorageDriver(
         while (attempt < MAX_RETRIES) {
             attempt++
             try {
+                checkDeviceConnected()
+
                 // 1. Send Command Block Wrapper (CBW - 31 bytes)
                 val cbwBytes = cbw.toByteArray()
                 val sentCbw = conn.bulkTransfer(outEp, cbwBytes, cbwBytes.size, timeoutMs)
@@ -195,13 +281,13 @@ class UsbMassStorageDriver(
                 // 2. Data Phase (IN or OUT if data length > 0)
                 if (dataLength > 0 && dataBuffer != null) {
                     if (cbw.direction == CommandBlockWrapper.Direction.DATA_IN) {
-                        val received = conn.bulkTransfer(inEp, dataBuffer, dataOffset, dataLength, timeoutMs)
+                        val received = bulkTransferInAll(conn, inEp, dataBuffer, dataOffset, dataLength, timeoutMs)
                         if (received < 0) {
                             clearHalt(inEp)
                             throw IOException("Data IN transfer failed (code: $received)")
                         }
                     } else if (cbw.direction == CommandBlockWrapper.Direction.DATA_OUT) {
-                        val sent = conn.bulkTransfer(outEp, dataBuffer, dataOffset, dataLength, timeoutMs)
+                        val sent = bulkTransferOutAll(conn, outEp, dataBuffer, dataOffset, dataLength, timeoutMs)
                         if (sent < 0) {
                             clearHalt(outEp)
                             throw IOException("Data OUT transfer failed (code: $sent)")
@@ -218,11 +304,13 @@ class UsbMassStorageDriver(
                 }
 
                 if (receivedCsw != CommandStatusWrapper.CSW_SIZE) {
+                    clearHalt(inEp)
                     throw IOException("Failed to read 13-byte CSW (received: $receivedCsw bytes)")
                 }
 
                 val csw = CommandStatusWrapper.parse(cswBuffer)
                 if (csw.tag != cbw.tag) {
+                    resetRecovery()
                     throw IOException("CSW Tag mismatch: expected ${cbw.tag}, got ${csw.tag}")
                 }
 
@@ -231,8 +319,18 @@ class UsbMassStorageDriver(
                     throw IOException("SCSI Phase Error reported by device CSW")
                 }
 
+                if (csw.isFailed && autoRequestSense) {
+                    try {
+                        val sense = requestSenseInternal()
+                        Log.w(TAG, "SCSI Command Failed: SenseKey=${sense.senseKeyDescription} (0x${Integer.toHexString(sense.senseKey)}), ASC=${sense.ascDescription}")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Auto REQUEST SENSE query failed: ${e.message}")
+                    }
+                }
+
                 return csw
             } catch (e: Exception) {
+                if (e is DeviceDisconnectedException) throw e
                 Log.w(TAG, "BOT Transaction failed on attempt $attempt: ${e.message}")
                 if (attempt >= MAX_RETRIES) {
                     throw if (e is IOException) e else IOException("BOT Transaction exhausted retries", e)
@@ -242,6 +340,52 @@ class UsbMassStorageDriver(
         }
 
         throw IOException("BOT Transaction failed after $MAX_RETRIES attempts")
+    }
+
+    /**
+     * Internal implementation of REQUEST SENSE without auto-recovery recursion.
+     */
+    private fun requestSenseInternal(): ScsiCdbBuilder.SenseDataResponse {
+        val cdb = ScsiCdbBuilder.requestSense(18)
+        val buffer = ByteArray(18)
+        val cbw = CommandBlockWrapper.create(18, CommandBlockWrapper.Direction.DATA_IN, cdb)
+        val csw = executeBotTransaction(cbw, buffer, 0, 18, autoRequestSense = false)
+        return if (csw.isSuccess) {
+            ScsiCdbBuilder.parseRequestSense(buffer)
+        } else {
+            ScsiCdbBuilder.parseRequestSense(ByteArray(0))
+        }
+    }
+
+    /**
+     * Issues SCSI REQUEST SENSE (0x03) to retrieve sense key and ASC/ASCQ details.
+     */
+    fun requestSense(): ScsiCdbBuilder.SenseDataResponse {
+        return ioLock.withLock {
+            requestSenseInternal()
+        }
+    }
+
+    /**
+     * Issues SCSI MODE_SENSE_6 (0x1A) to check write-protect and device parameters.
+     */
+    fun modeSense(): ScsiCdbBuilder.ModeSenseResponse {
+        return ioLock.withLock {
+            try {
+                val cdb = ScsiCdbBuilder.modeSense6(0x3F, 192)
+                val buffer = ByteArray(192)
+                val cbw = CommandBlockWrapper.create(192, CommandBlockWrapper.Direction.DATA_IN, cdb)
+                val csw = executeBotTransaction(cbw, buffer, 0, 192, autoRequestSense = false)
+                if (csw.isSuccess) {
+                    ScsiCdbBuilder.parseModeSense6(buffer)
+                } else {
+                    ScsiCdbBuilder.parseModeSense6(ByteArray(0))
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "MODE SENSE failed: ${e.message}")
+                ScsiCdbBuilder.parseModeSense6(ByteArray(0))
+            }
+        }
     }
 
     /**
@@ -256,12 +400,17 @@ class UsbMassStorageDriver(
         length: Int,
         timeoutMs: Int = WRITE_TIMEOUT_MS
     ): Boolean {
-        ioLock.withLock {
-            val conn = connection ?: throw IOException("USB Driver is not connected")
+        return ioLock.withLock {
+            checkDeviceConnected()
+            val conn = connection ?: throw DeviceDisconnectedException("USB Driver is not connected")
             val outEp = outEndpoint ?: throw IOException("OUT Endpoint unavailable")
             val inEp = inEndpoint ?: throw IOException("IN Endpoint unavailable")
 
-            val cdb = ScsiCdbBuilder.write10(lba, blockCount)
+            val cdb = if (lba > 0xFFFFFFFFL || blockCount > 0xFFFF) {
+                ScsiCdbBuilder.write16(lba, blockCount.toLong())
+            } else {
+                ScsiCdbBuilder.write10(lba, blockCount)
+            }
             val cbw = CommandBlockWrapper.create(
                 dataTransferLength = length,
                 direction = CommandBlockWrapper.Direction.DATA_OUT,
@@ -278,11 +427,14 @@ class UsbMassStorageDriver(
             // Transfer data directly from byte array / buffer slice
             val tempArray = ByteArray(length)
             val pos = directBuffer.position()
-            directBuffer.position(offset)
-            directBuffer.get(tempArray, 0, length)
-            directBuffer.position(pos)
+            try {
+                directBuffer.position(offset)
+                directBuffer.get(tempArray, 0, length)
+            } finally {
+                directBuffer.position(pos)
+            }
 
-            val sentData = conn.bulkTransfer(outEp, tempArray, length, timeoutMs)
+            val sentData = bulkTransferOutAll(conn, outEp, tempArray, 0, length, timeoutMs)
             if (sentData < 0) {
                 clearHalt(outEp)
                 throw IOException("Failed to write data at LBA $lba (sent: $sentData)")
@@ -296,11 +448,28 @@ class UsbMassStorageDriver(
             }
 
             if (receivedCsw != CommandStatusWrapper.CSW_SIZE) {
+                clearHalt(inEp)
                 throw IOException("Failed to read CSW after writing LBA $lba")
             }
 
             val csw = CommandStatusWrapper.parse(cswBuffer)
-            return csw.isSuccess
+            if (csw.tag != cbw.tag) {
+                resetRecovery()
+                throw IOException("CSW Tag mismatch after writing LBA $lba")
+            }
+            if (csw.isPhaseError) {
+                resetRecovery()
+                throw IOException("SCSI Phase Error reported after writing LBA $lba")
+            }
+            if (csw.isFailed) {
+                try {
+                    val sense = requestSenseInternal()
+                    Log.w(TAG, "Write failed at LBA $lba: SenseKey=${sense.senseKeyDescription}, ASC=${sense.ascDescription}")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Sense query after write failure failed: ${e.message}")
+                }
+            }
+            csw.isSuccess
         }
     }
 
@@ -344,18 +513,38 @@ class UsbMassStorageDriver(
             if (!csw.isSuccess) {
                 throw IOException("SCSI READ_CAPACITY_10 failed with CSW status: ${csw.status}")
             }
-            ScsiCdbBuilder.parseReadCapacity10(buffer)
+            val cap10 = ScsiCdbBuilder.parseReadCapacity10(buffer)
+            // Drives > 2 TB report 0xFFFFFFFF for READ_CAPACITY_10 and require READ_CAPACITY_16
+            if (cap10.maxLba == 0xFFFFFFFFL) {
+                try {
+                    val cdb16 = ScsiCdbBuilder.readCapacity16(32)
+                    val buffer16 = ByteArray(32)
+                    val cbw16 = CommandBlockWrapper.create(32, CommandBlockWrapper.Direction.DATA_IN, cdb16)
+                    val csw16 = executeBotTransaction(cbw16, buffer16, 0, 32)
+                    if (csw16.isSuccess) {
+                        return@withLock ScsiCdbBuilder.parseReadCapacity16(buffer16)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "READ_CAPACITY_16 fallback failed: ${e.message}, using READ_CAPACITY_10 result")
+                }
+            }
+            cap10
         }
     }
 
     /**
      * Reads sector blocks starting at [lba].
+     * Dispatches automatically between READ_10 and READ_16.
      */
     fun readBlocks(lba: Long, blockCount: Int, destBuffer: ByteArray, offset: Int = 0): Boolean {
         return ioLock.withLock {
             val sectorSize = diskInfo?.sectorSizeBytes ?: 512
             val totalBytes = blockCount * sectorSize
-            val cdb = ScsiCdbBuilder.read10(lba, blockCount)
+            val cdb = if (lba > 0xFFFFFFFFL || blockCount > 0xFFFF) {
+                ScsiCdbBuilder.read16(lba, blockCount.toLong())
+            } else {
+                ScsiCdbBuilder.read10(lba, blockCount)
+            }
             val cbw = CommandBlockWrapper.create(totalBytes, CommandBlockWrapper.Direction.DATA_IN, cdb)
             val csw = executeBotTransaction(cbw, destBuffer, offset, totalBytes)
             csw.isSuccess
@@ -364,12 +553,17 @@ class UsbMassStorageDriver(
 
     /**
      * Writes sector blocks starting at [lba].
+     * Dispatches automatically between WRITE_10 and WRITE_16.
      */
     fun writeBlocks(lba: Long, blockCount: Int, srcBuffer: ByteArray, offset: Int = 0): Boolean {
         return ioLock.withLock {
             val sectorSize = diskInfo?.sectorSizeBytes ?: 512
             val totalBytes = blockCount * sectorSize
-            val cdb = ScsiCdbBuilder.write10(lba, blockCount)
+            val cdb = if (lba > 0xFFFFFFFFL || blockCount > 0xFFFF) {
+                ScsiCdbBuilder.write16(lba, blockCount.toLong())
+            } else {
+                ScsiCdbBuilder.write10(lba, blockCount)
+            }
             val cbw = CommandBlockWrapper.create(totalBytes, CommandBlockWrapper.Direction.DATA_OUT, cdb)
             val csw = executeBotTransaction(cbw, srcBuffer, offset, totalBytes, WRITE_TIMEOUT_MS)
             csw.isSuccess
@@ -391,6 +585,40 @@ class UsbMassStorageDriver(
                 false
             }
         }
+    }
+
+    // --- BlockDevice Interface Implementation ---
+
+    override suspend fun capacity(): DeviceCapacity {
+        currentCoroutineContext().ensureActive()
+        val cap = readCapacity()
+        return DeviceCapacity(cap.maxLba + 1L, cap.blockSizeBytes)
+    }
+
+    override suspend fun read(lba: Long, blockCount: Int, dest: ByteArray, offset: Int): Boolean {
+        currentCoroutineContext().ensureActive()
+        return readBlocks(lba, blockCount, dest, offset)
+    }
+
+    override suspend fun write(lba: Long, blockCount: Int, src: ByteArray, offset: Int): Boolean {
+        currentCoroutineContext().ensureActive()
+        return writeBlocks(lba, blockCount, src, offset)
+    }
+
+    override suspend fun writeDirectBuffer(
+        lba: Long,
+        blockCount: Int,
+        directBuffer: ByteBuffer,
+        offset: Int,
+        length: Int
+    ): Boolean {
+        currentCoroutineContext().ensureActive()
+        return writeDirectBuffer(lba, blockCount, directBuffer, offset, length, WRITE_TIMEOUT_MS)
+    }
+
+    override suspend fun flush(): Boolean {
+        currentCoroutineContext().ensureActive()
+        return synchronizeCache()
     }
 
     /**

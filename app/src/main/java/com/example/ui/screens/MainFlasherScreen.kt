@@ -138,7 +138,7 @@ fun MainFlasherScreen(
                                 letterSpacing = (-0.2).sp
                             )
                             Text(
-                                text = "NDK v26.1.10 | BOT ENGINE",
+                                text = "KOTLIN USB HOST | BOT SCSI ENGINE",
                                 color = ElegantBlueAccent,
                                 fontSize = 9.sp,
                                 fontWeight = FontWeight.Bold,
@@ -400,7 +400,7 @@ fun MainFlasherScreen(
                                 fontWeight = FontWeight.Medium
                             )
                             Text(
-                                text = "Read back sectors to guarantee zero bitflips",
+                                text = "Compute checksum during stream (Sector read-back planned)",
                                 color = TextMuted,
                                 fontSize = 10.sp
                             )
@@ -676,7 +676,7 @@ fun MainFlasherScreen(
                 }
 
                 Text(
-                    text = "ZERO-COPY MEMORY ACTIVE | SCSI BULK TRANSPORT MODE",
+                    text = "SPSC RING BUFFER ACTIVE | SCSI BULK TRANSPORT MODE",
                     color = TextFaint,
                     fontSize = 9.sp,
                     fontWeight = FontWeight.Medium,
