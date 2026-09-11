@@ -248,14 +248,13 @@ def run_audit(repo_root, test_report_path=None, verbose=True):
 
     # 2. Check execution evidence
     if test_report_path is None:
-        # Check standard Gradle build test report directory
-        candidate = os.path.join(repo_root, "app", "build", "reports", "tests", "testDebugUnitTest")
-        if os.path.exists(candidate):
-            test_report_path = candidate
-        else:
-            candidate2 = os.path.join(repo_root, "app", "build", "test-results", "testDebugUnitTest")
-            if os.path.exists(candidate2):
-                test_report_path = candidate2
+        # Check standard Gradle build test report directory (XML output in test-results)
+        candidate_results = os.path.join(repo_root, "app", "build", "test-results", "testDebugUnitTest")
+        candidate_reports = os.path.join(repo_root, "app", "build", "reports", "tests", "testDebugUnitTest")
+        if os.path.exists(candidate_results):
+            test_report_path = candidate_results
+        elif os.path.exists(candidate_reports):
+            test_report_path = candidate_reports
 
     exec_results = parse_execution_reports(test_report_path) if test_report_path else None
 
