@@ -24,7 +24,7 @@ This document provides a transparent, engineering-level breakdown of the current
 
 FlashCore is an open-source Android utility designed to communicate directly with USB flash drives over USB On-The-Go (OTG) via Android's user-space USB Host API (`android.hardware.usb.UsbManager`) and raw SCSI Bulk-Only Transport (BOT).
 
-- **What FlashCore is today:** A fully implemented, software-tested flashing engine capable of Sector 0 raw streaming (Linux hybrid), GPT/FAT32 partitioning and ISO extraction with WIM chunking (Windows UEFI), and dual-partition multi-boot preparation (Ventoy), backed by an automated 93-test suite on abstract block devices.
+- **What FlashCore is today:** A fully implemented, software-tested flashing engine capable of Sector 0 raw streaming (Linux hybrid), GPT/FAT32 partitioning and ISO extraction with WIM chunking (Windows UEFI), and dual-partition multi-boot preparation (Ventoy), backed by an automated 102-test suite on abstract block devices.
 - **What FlashCore is NOT today:** FlashCore is **not yet hardware-matrix validated** across diverse physical USB flash drive controllers, Android OEM hardware, or PC motherboards. No claims of "battle-tested" or "production-grade" reliability on real hardware are made without empirical qualification data.
 
 ---
@@ -33,9 +33,9 @@ FlashCore is an open-source Android utility designed to communicate directly wit
 
 All automated test verification in FlashCore is conducted strictly in **software-only environments** using pure JVM unit tests, Robolectric Android runtime simulations, and in-memory or file-backed storage abstractions.
 
-### Automated Test Inventory (93 Tests Total)
-* **92 Unit & Robolectric Tests (`app/src/test`):**
-  - `BlockDeviceFrameworkTest.kt` (12 tests): Validates sector reads, writes, GPT headers, FAT32 boot records, 100 MB throughput simulation, 4 GB sparse boundaries, sector failure injection, disconnect simulation, short write simulation, and timeout simulation.
+### Automated Test Inventory (102 Tests Total)
+* **101 Unit & Robolectric Tests (`app/src/test`):**
+  - `BlockDeviceFrameworkTest.kt` (20 tests): Validates sector reads, writes, GPT headers, FAT32 boot records, 100 MB throughput simulation, 4 GB sparse boundaries, sector failure injection, disconnect simulation, short write simulation, timeout simulation, configurable sector sizes (512/4096B), multi-sector transfers with buffer offsets, auto-capacity detection, strict LBA/overflow bounds checking, direct buffer validation, sparse zero-fill reads, closed device lifecycle, and MBR/GPT disk image integration.
   - `AndroidProductionEngineeringTest.kt` (10 tests): Validates foreground service lifecycle, cancellation action dispatch, `SavedStateHandle` restoration across process recreation, dynamic USB detachment broadcast handling, SAF 64-bit integer arithmetic, and synthetic 50 MB benchmark scaling.
   - `Fat32WriterTest.kt` (9 tests): Validates volume formatting, VBR/FSInfo boot sectors, directory creation (`mkdir`), multi-cluster file writes, cluster appending, directory expansion, Long File Names (LFN), and FSInfo free cluster tracking.
   - `PartitionEngineTest.kt` (9 tests): Validates MBR construction, Protective MBR generation, GPT table generation, dynamic CRC32 computation, round-trip GPT parsing, tamper detection, mixed-endian GUID conversions, and 1 MiB alignment arithmetic.

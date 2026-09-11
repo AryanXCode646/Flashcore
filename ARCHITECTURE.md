@@ -76,7 +76,7 @@ The core architecture of FlashCore enforces strict separation of concerns, ensur
 Flashing bootable operating systems over USB OTG carries inherent risk: corrupted sectors or miscalculated partition boundaries produce unbootable media or damage file structures.
 
 FlashCore adheres to a fundamental principle:
-> **"Evidence over claims."** An implementation backed by 93 automated tests on abstract block devices and honest documentation of physical hardware limits is far more defensible than marketing unvalidated features as "production-grade."
+> **"Evidence over claims."** An implementation backed by 101 automated tests on abstract block devices and honest documentation of physical hardware limits is far more defensible than marketing unvalidated features as "production-grade."
 
 Every layer in FlashCore is designed to be **isolated, mockable, and verifiable offline** without requiring physical Android devices or USB drives.
 
@@ -89,8 +89,8 @@ To maintain engineering transparency, the architectural reality of the repositor
 | Dimension | Current Implementation Reality | Planned Architectural Roadmap |
 | :--- | :--- | :--- |
 | **Gradle Modules** | Single monolithic `:app` module containing all layers | Multi-module separation (`:core`, `:flashers`, `:app`) |
-| **Package Namespace** | `com.example.*` across all source packages | `com.ashishsinghbora.flashcore.*` |
-| **Testing Scope** | 93 automated software tests on `BlockDevice` doubles | Automated CI + physical USB controller test matrix |
+| **Package Namespace** | `com.ashishsinghbora.flashcore.*` across all source packages | Multi-module package organization |
+| **Testing Scope** | 101 automated software tests on `BlockDevice` doubles | Automated CI + physical USB controller test matrix |
 | **USB Memory Pipeline** | Direct-buffer circular ring buffer with heap staging copy | Direct ring buffer (true zero-copy is not possible via public Android APIs; requires staging copy) |
 | **Hardware Status** | Software tested; hardware validation pending | Physical qualification across OEM and controller matrix |
 
@@ -164,14 +164,14 @@ All layers currently reside within the `app` module under `com.example.*`.
   - Computes partition table and header CRC32 digests dynamically.
 
 ### Layer 6: Block Device Abstraction
-* **Components:** `BlockDevice` interface, `MemoryBlockDevice`, `FileBackedBlockDevice`, `FaultInjectingBlockDevice`.
+* **Components:** `BlockDevice` interface, `MemoryBlockDevice`, `FileBackedBlockDevice`, `FaultInjectingBlockDevice`, `FakeBlockDevice`.
 * **Responsibilities:**
   - Isolates upper layers from physical hardware APIs:
     ```kotlin
-    interface BlockDevice {
-        val totalCapacityBytes: Long
+    interface BlockDevice : Closeable {
+        val isConnected: Boolean
         val sectorSizeBytes: Int
-        val totalSectors: Long
+        suspend fun capacity(): DeviceCapacity
         suspend fun read(lba: Long, blockCount: Int, dest: ByteArray, offset: Int = 0): Boolean
         suspend fun write(lba: Long, blockCount: Int, src: ByteArray, offset: Int = 0): Boolean
         suspend fun writeDirectBuffer(lba: Long, blockCount: Int, directBuffer: ByteBuffer, offset: Int, length: Int): Boolean
@@ -179,6 +179,15 @@ All layers currently reside within the `app` module under `com.example.*`.
     }
     ```
   - Powers automated offline testing via in-memory, file-backed, and fault-injecting test doubles.
+  - **File-Backed Disk Images (`FileBackedBlockDevice`):**
+    - Enables persistent raw disk images (`.img`) on host filesystems for integration testing without physical USB hardware.
+    - **Configurable Sector Sizes:** Supports 512-byte and 4096-byte (4K native) geometries.
+    - **Capacity & Geometry Semantics:**
+      - *Explicit Logical Capacity:* New or sparse images specify `totalSectors`, with optional preallocation.
+      - *Auto-Capacity Detection:* Existing images opened via `openExisting(file)` derive capacity from backing file byte length (`file.length() / sectorSizeBytes`) with strict alignment validation.
+    - **Sparse & Unwritten Region Semantics:** Unallocated or trailing sparse regions read back as deterministic zeroes.
+    - **Safety & Verification:** Overflow-safe 64-bit LBA bounds checks, buffer offset/length validation, direct `ByteBuffer` integrity verification, and media cache persistence via `FileChannel.force(true)` on `flush()`.
+    - **Lifecycle:** Idempotent `close()` and consistent `DeviceDisconnectedException` enforcement upon disconnection.
 
 ### Layer 7: Hardware Transport & SCSI Driver
 * **Components:** `UsbMassStorageDriver`, `CommandBlockWrapper` (CBW), `CommandStatusWrapper` (CSW), `ScsiCdbBuilder`.
