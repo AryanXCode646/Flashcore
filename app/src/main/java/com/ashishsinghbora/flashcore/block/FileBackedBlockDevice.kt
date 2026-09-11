@@ -118,7 +118,7 @@ class FileBackedBlockDevice @JvmOverloads constructor(
         val totalBytes = calculateTotalBytes(blockCount)
         validateBufferBounds(dest.size, offset, totalBytes)
 
-        val fileOffset = lba * sectorSizeBytes.toLong()
+        val fileOffset = Math.multiplyExact(lba, sectorSizeBytes.toLong())
         synchronized(lock) {
             checkConnected()
             val fileLength = raf.length()
@@ -153,7 +153,7 @@ class FileBackedBlockDevice @JvmOverloads constructor(
         val totalBytes = calculateTotalBytes(blockCount)
         validateBufferBounds(src.size, offset, totalBytes)
 
-        val fileOffset = lba * sectorSizeBytes.toLong()
+        val fileOffset = Math.multiplyExact(lba, sectorSizeBytes.toLong())
         synchronized(lock) {
             checkConnected()
             raf.seek(fileOffset)
@@ -185,20 +185,28 @@ class FileBackedBlockDevice @JvmOverloads constructor(
         if (length < 0) {
             throw IllegalArgumentException("Length cannot be negative: $length")
         }
-        val expectedBytes = blockCount.toLong() * sectorSizeBytes.toLong()
-        if (length.toLong() != expectedBytes) {
+        val expectedBytesLong = try {
+            Math.multiplyExact(blockCount.toLong(), sectorSizeBytes.toLong())
+        } catch (e: ArithmeticException) {
+            throw IllegalArgumentException("Required transfer bytes overflows Long", e)
+        }
+        if (length.toLong() != expectedBytesLong) {
             throw IllegalArgumentException(
-                "Requested length ($length bytes) does not match blockCount ($blockCount sectors * $sectorSizeBytes bytes/sector = $expectedBytes bytes)"
+                "Requested length ($length bytes) does not match blockCount ($blockCount sectors * $sectorSizeBytes bytes/sector = $expectedBytesLong bytes)"
             )
         }
         val bufferLimit = directBuffer.limit()
-        if (offset > bufferLimit || offset.toLong() + length.toLong() > bufferLimit.toLong()) {
+        if (offset > bufferLimit) {
+            throw IndexOutOfBoundsException("Buffer offset $offset exceeds buffer limit $bufferLimit")
+        }
+        val availableBytes = bufferLimit - offset
+        if (length > availableBytes) {
             throw IndexOutOfBoundsException(
-                "Requested range [$offset..${offset.toLong() + length.toLong()}] exceeds buffer limit ($bufferLimit)"
+                "Required transfer length ($length bytes) exceeds available buffer range ($availableBytes bytes from offset $offset to limit $bufferLimit)"
             )
         }
 
-        val fileOffset = lba * sectorSizeBytes.toLong()
+        val fileOffset = Math.multiplyExact(lba, sectorSizeBytes.toLong())
         val slice = directBuffer.duplicate()
         slice.position(offset)
         slice.limit(offset + length)
@@ -252,14 +260,22 @@ class FileBackedBlockDevice @JvmOverloads constructor(
         if (blockCount <= 0) {
             throw IOException("Block count must be positive: $blockCount")
         }
-        if (lba >= totalSectors || blockCount.toLong() > totalSectors - lba) {
-            val endSector = if (Long.MAX_VALUE - lba < blockCount.toLong()) "overflow" else "${lba + blockCount.toLong() - 1L}"
-            throw IOException("Requested LBA range [$lba..$endSector] exceeds device total sectors $totalSectors")
+        val endLba = try {
+            Math.addExact(lba, blockCount.toLong())
+        } catch (e: ArithmeticException) {
+            throw IOException("Requested LBA range [$lba..+${blockCount}] overflows Long", e)
+        }
+        if (endLba > totalSectors) {
+            throw IOException("Requested LBA range [$lba..${endLba - 1L}] exceeds device total sectors $totalSectors")
         }
     }
 
     private fun calculateTotalBytes(blockCount: Int): Int {
-        val totalBytesLong = blockCount.toLong() * sectorSizeBytes.toLong()
+        val totalBytesLong = try {
+            Math.multiplyExact(blockCount.toLong(), sectorSizeBytes.toLong())
+        } catch (e: ArithmeticException) {
+            throw IllegalArgumentException("Transfer size in bytes overflows Long", e)
+        }
         if (totalBytesLong > Int.MAX_VALUE.toLong()) {
             throw IllegalArgumentException(
                 "Transfer size in bytes ($totalBytesLong) exceeds maximum supported buffer size (${Int.MAX_VALUE})"
@@ -272,9 +288,13 @@ class FileBackedBlockDevice @JvmOverloads constructor(
         if (offset < 0) {
             throw IndexOutOfBoundsException("Buffer offset cannot be negative: $offset")
         }
-        if (offset.toLong() + totalBytes.toLong() > bufferSize.toLong()) {
+        if (offset > bufferSize) {
+            throw IndexOutOfBoundsException("Buffer offset $offset exceeds buffer size $bufferSize")
+        }
+        val availableBytes = bufferSize - offset
+        if (totalBytes > availableBytes) {
             throw IndexOutOfBoundsException(
-                "Buffer range [$offset..${offset.toLong() + totalBytes.toLong()}] exceeds buffer size $bufferSize"
+                "Required transfer bytes ($totalBytes) exceeds available buffer space ($availableBytes)"
             )
         }
     }

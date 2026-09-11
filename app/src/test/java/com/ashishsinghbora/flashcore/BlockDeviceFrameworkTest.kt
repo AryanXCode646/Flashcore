@@ -1140,6 +1140,133 @@ class BlockDeviceFrameworkTest {
     }
 
     @Test
+    fun testFileBackedBlockDeviceDirectBufferSlicedAndReadOnly() {
+        runBlocking {
+            val diskImageFile = File(tempFolder.root, "sliced_readonly_test.img")
+            val totalSectors = 100L
+
+            FileBackedBlockDevice(diskImageFile, totalSectors = totalSectors, sectorSizeBytes = 512).use { dev ->
+                val direct = ByteBuffer.allocateDirect(2048)
+                val pattern = ByteArray(1024) { (it % 97).toByte() }
+                direct.put(pattern)
+                direct.flip() // position = 0, limit = 1024, capacity = 2048
+
+                // 1. Read-only ByteBuffer
+                val readOnlyBuf = direct.asReadOnlyBuffer()
+                assertTrue(readOnlyBuf.isReadOnly)
+                assertTrue(dev.writeDirectBuffer(lba = 0L, blockCount = 2, directBuffer = readOnlyBuf, offset = 0, length = 1024))
+                val readBackRo = ByteArray(1024)
+                assertTrue(dev.read(0L, 2, readBackRo))
+                assertArrayEquals(pattern, readBackRo)
+
+                // 2. Sliced ByteBuffer
+                direct.position(512)
+                val sliced = direct.slice() // sliced has capacity = 512, limit = 512
+                assertEquals(512, sliced.remaining())
+                assertTrue(dev.writeDirectBuffer(lba = 10L, blockCount = 1, directBuffer = sliced, offset = 0, length = 512))
+                val readBackSlice = ByteArray(512)
+                assertTrue(dev.read(10L, 1, readBackSlice))
+                assertArrayEquals(pattern.copyOfRange(512, 1024), readBackSlice)
+
+                // 3. Limit < capacity with requested range exceeding limit
+                direct.clear()
+                direct.limit(512) // limit is 512, capacity is 2048
+                assertThrows(IndexOutOfBoundsException::class.java) {
+                    runBlocking {
+                        dev.writeDirectBuffer(lba = 20L, blockCount = 2, directBuffer = direct, offset = 0, length = 1024)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun testFileBackedBlockDeviceHostileInputEdgeCases() {
+        runBlocking {
+            val diskImageFile = File(tempFolder.root, "hostile_test.img")
+
+            // 1. sectorSizeBytes <= 0
+            assertThrows(IllegalArgumentException::class.java) {
+                FileBackedBlockDevice(diskImageFile, totalSectors = 100L, sectorSizeBytes = 0)
+            }
+            assertThrows(IllegalArgumentException::class.java) {
+                FileBackedBlockDevice(diskImageFile, totalSectors = 100L, sectorSizeBytes = -512)
+            }
+
+            // 2. totalSectors <= 0
+            assertThrows(IllegalArgumentException::class.java) {
+                FileBackedBlockDevice(diskImageFile, totalSectors = 0L, sectorSizeBytes = 512)
+            }
+            assertThrows(IllegalArgumentException::class.java) {
+                FileBackedBlockDevice(diskImageFile, totalSectors = -10L, sectorSizeBytes = 512)
+            }
+
+            // 3. totalSectors near Long.MAX_VALUE (multiplication overflow)
+            assertThrows(IllegalArgumentException::class.java) {
+                FileBackedBlockDevice(diskImageFile, totalSectors = Long.MAX_VALUE, sectorSizeBytes = 512)
+            }
+
+            // 4. Directory instead of regular file
+            val dirAsFile = tempFolder.newFolder("dir_not_file")
+            assertThrows(IllegalArgumentException::class.java) {
+                FileBackedBlockDevice(dirAsFile, totalSectors = 100L, sectorSizeBytes = 512)
+            }
+            assertThrows(IllegalArgumentException::class.java) {
+                FileBackedBlockDevice.openExisting(dirAsFile)
+            }
+
+            // 5. Valid device with runtime hostile I/O parameters
+            FileBackedBlockDevice(diskImageFile, totalSectors = 50L, sectorSizeBytes = 512).use { dev ->
+                val buffer = ByteArray(512)
+
+                // Buffer offset > array.size
+                assertThrows(IndexOutOfBoundsException::class.java) {
+                    runBlocking { dev.read(0L, 1, buffer, offset = buffer.size + 1) }
+                }
+                assertThrows(IndexOutOfBoundsException::class.java) {
+                    runBlocking { dev.write(0L, 1, buffer, offset = buffer.size + 1) }
+                }
+
+                // blockCount huge (exceeds capacity) -> IOException
+                assertThrows(IOException::class.java) {
+                    runBlocking { dev.read(0L, Int.MAX_VALUE, buffer) }
+                }
+                assertThrows(IOException::class.java) {
+                    runBlocking { dev.write(0L, Int.MAX_VALUE, buffer) }
+                }
+
+                // LBA = Long.MAX_VALUE
+                assertThrows(IOException::class.java) {
+                    runBlocking { dev.read(Long.MAX_VALUE, 1, buffer) }
+                }
+                assertThrows(IOException::class.java) {
+                    runBlocking { dev.write(Long.MAX_VALUE, 1, buffer) }
+                }
+
+                // Exactly one sector past capacity (LBA 50, count 1)
+                assertThrows(IOException::class.java) {
+                    runBlocking { dev.read(50L, 1, buffer) }
+                }
+                assertThrows(IOException::class.java) {
+                    runBlocking { dev.write(50L, 1, buffer) }
+                }
+            }
+
+            // 6. Device with capacity large enough that LBA bounds pass, but blockCount byte calculation exceeds Int.MAX_VALUE
+            val hugeDiskFile = File(tempFolder.root, "huge_capacity.img")
+            FileBackedBlockDevice(hugeDiskFile, totalSectors = 10_000_000_000L, sectorSizeBytes = 512).use { hugeDev ->
+                val buffer = ByteArray(512)
+                assertThrows(IllegalArgumentException::class.java) {
+                    runBlocking { hugeDev.read(0L, Int.MAX_VALUE, buffer) }
+                }
+                assertThrows(IllegalArgumentException::class.java) {
+                    runBlocking { hugeDev.write(0L, Int.MAX_VALUE, buffer) }
+                }
+            }
+        }
+    }
+
+    @Test
     fun testFileBackedBlockDeviceBackingFileGeometrySemantics() {
         runBlocking {
             val exactFile = File(tempFolder.root, "exact.img")
