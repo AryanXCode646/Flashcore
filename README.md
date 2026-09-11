@@ -7,42 +7,43 @@
 [![Platform](https://img.shields.io/badge/Platform-Android_8.0+-green.svg)](https://developer.android.com)
 [![JDK](https://img.shields.io/badge/JDK-21-red.svg)](https://adoptium.net)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.2+-purple.svg)](https://kotlinlang.org)
-[![Tests](https://img.shields.io/badge/Tests-80%2B%20Passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-93%20Automated%20Test%20Methods-blue.svg)]()
+[![Hardware Validation](https://img.shields.io/badge/Hardware%20Validation-Pending-yellow.svg)](LIMITATIONS.md)
 [![Documentation](https://img.shields.io/badge/Docs-Architecture%20%7C%20Limitations-orange.svg)](ARCHITECTURE.md)
 
-**FlashCore** is an Android utility designed to turn an Android device into a PC rescue toolkit. It communicates directly with USB flash drives over USB OTG using Android's USB Host API and raw SCSI Bulk-Only Transport (BOT) protocols — **without requiring root privileges.**
+**FlashCore** is an open-source Android utility designed to turn an Android device into a PC rescue toolkit. It communicates directly with USB flash drives over USB OTG using Android's USB Host API and raw SCSI Bulk-Only Transport (BOT) protocols — **without requiring root privileges.**
 
 ---
 
-## 🧭 The FlashCore Philosophy: Trustworthy over Feature-Rich
+## 🧭 The FlashCore Philosophy: Evidence Over Claims
 
 Flashing operating systems over USB OTG is low-level, high-consequence systems programming. Corrupting a single sector or miscalculating partition alignment produces unbootable media or corrupts flash drives.
 
-FlashCore rejects the hype trap. We do **not** prioritize flashy graphs, network ISO downloads, SD cards, or AI features. 
+FlashCore rejects marketing exaggeration. We do **not** prioritize flashy graphs, network ISO downloads, SD cards, or AI features. 
 
-Our guiding principle is **evidence over claims**:
-> *"FlashCore safely writes an image to USB, handles disconnects, verifies every single block, has automated tests, and is validated across real USB devices."*
+Our guiding principle is **engineering truthfulness**:
+> *"Never claim production-grade reliability without concrete physical hardware validation. Code and test-suite verification must be separated clearly from real-world device and firmware compatibility."*
 
-### Engineering Priorities
-1. 🥇 **Correctness:** Bit-for-bit exactness in sector writing and verification.
-2. 🥈 **Safety:** Hardened disconnect handling (`ACTION_USB_DEVICE_DETACHED`) and target drive validation.
-3. 🥉 **Testability:** 100% of core logic runs offline via pure `BlockDevice` abstractions.
-4. **USB Reliability:** SCSI BOT stall recovery, retry loops, and sense error handling.
+### Engineering Priorities & Baseline Reality
+1. 🥇 **Correctness:** Bit-for-bit exactness in sector writing and verification logic.
+2. 🥈 **Safety:** Hardened disconnect handling (`ACTION_USB_DEVICE_DETACHED`) and target drive safety checks.
+3. 🥉 **Testability:** Core logic is decoupled from Android hardware APIs and covered by 93 automated tests (92 unit/Robolectric in JVM + 1 Android instrumentation test) on abstract `BlockDevice` doubles.
+4. **USB Reliability:** SCSI BOT stall recovery routines, clear-halt, and reset recovery (physical controller compatibility matrix pending).
 5. **Block-Device Abstraction:** Zero coupling between UI/engines and Android hardware APIs.
 6. **Partition Correctness:** Strict GPT/MBR alignment, CRC32 checks, and protective structures.
-7. **Filesystem Correctness:** Fully conforming FAT32/ISO structures, directory records, and cluster maps.
-8. **Linux Flashing:** Production-grade hybrid streaming with bit-for-bit target read-back verification.
-9. **Windows Flashing:** UEFI FAT32 extraction and dynamic WIM chunking.
-10. **Ventoy:** Compliant multi-boot dual-partitioning and non-destructive updating.
-11. **Android UX:** Foreground service (`dataSync`), notification cancellation, process death persistence.
-12. **Performance Optimization:** Direct ring buffer decoupling and GC pause reduction.
-13. **Release Engineering:** Automated CI/CD, lint checks, test suites, reproducible builds, and signed releases.
+7. **Filesystem Correctness:** FAT32/ISO structures, directory records, and cluster allocation verified in software.
+8. **Linux Flashing:** Sector 0 streaming pipeline with optional bit-for-bit target read-back verification (`FlashVerifier`).
+9. **Windows Flashing:** Dynamic architecture detection, UEFI FAT32 layout, and on-the-fly WIM stream chunking (physical motherboard boot validation pending).
+10. **Ventoy:** Compliant multi-boot dual-partitioning and non-destructive updating (real PC boot testing pending).
+11. **Android UX:** Foreground service (`dataSync`), notification cancellation action, `SavedStateHandle` process death restoration.
+12. **Streaming Pipeline:** Direct-buffer based streaming pipeline intended to reduce allocation and GC pressure; USB transfer currently includes a heap staging copy due to Android API constraints.
+13. **Release Engineering:** Automated CI/CD workflows, lint checks, test suites, and reproducible build configuration (official signed public release pending).
 
 ---
 
 ## 🏛️ System Architecture
 
-FlashCore enforces a strict downward dependency flow where UI components never speak to USB hardware directly:
+FlashCore enforces a downward dependency flow where UI components never speak to USB hardware directly:
 
 ```
                          FlashCore
@@ -88,56 +89,61 @@ For complete technical specifications, review [`ARCHITECTURE.md`](ARCHITECTURE.m
 
 ## 📊 Feature Status Matrix
 
-| Component | Status | Details |
-| :--- | :---: | :--- |
-| **Linux Hybrid (Raw DD)** | 🟢 **Production-Grade** | 8-stage pipeline: validation, checksum pre-flight, raw streaming, cache flush (`SYNCHRONIZE_CACHE_10`), and bit-for-bit target read-back verification (`FlashVerifier`). |
-| **Windows UEFI Flasher** | 🟡 **Engine Implemented** | Dynamic capability detection (x64/ARM64/IA32), WIM/SWM chunking, FAT32 cluster writing, BCD/bootloader provisioning, and binary PE verification. Physical PC firmware testing ongoing. |
-| **Ventoy Multi-Boot Engine** | 🟡 **Engine Implemented** | Dual-partition MBR/GPT layout, 32 MB VTOYEFI asset provider, FAT32 data volume, filesystem ISO storage, and non-destructive update. Physical PC firmware testing ongoing. |
-| **Non-Root USB Mass Storage Driver** | 🟢 **Production-Grade** | SCSI Bulk-Only Transport (BOT) via Android `UsbManager` (CBW, CSW, INQUIRY, READ_CAPACITY_10/16, READ_10/16, WRITE_10/16). |
-| **Target Read-Back Verification** | 🟢 **Production-Grade** | Real bit-for-bit physical sector read-back pass (`FlashVerifier`) with exact LBA error pinpointing and dual SHA-256 validation. |
-| **Block Device Test Framework** | 🟢 **Production-Grade** | In-memory sparse, file-backed, and fault-injecting block devices with 80+ automated offline unit tests (`./gradlew test`). |
-| **FAT32 Filesystem Writer** | 🟢 **Production-Grade** | Full cluster allocator, directory parser, VBR/FSInfo writer, mkdir, createFile, and streaming file writer (`Fat32Writer`). |
-| **ISO Filesystem Engine** | 🟢 **Production-Grade** | ISO 9660 & Joliet volume descriptor parser, directory tree reader, and streaming file extractor (`IsoFilesystemReader`). |
-| **Android Production Engineering** | 🟢 **Production-Grade** | ForegroundService (`dataSync`), user cancellation action, `SavedStateHandle` process death recovery, OTG disconnect handling, persistable SAF URIs, and 1GB–64GB benchmarking suite. |
-| **SPSC Direct Ring Buffer** | 🟢 **Production-Grade** | Off-heap `ByteBuffer.allocateDirect` circular buffer for producer-consumer I/O rate decoupling. |
+| Component | Implementation | Software Tests | Hardware Validation | Current Status | Known Limitations | Evidence |
+| :--- | :--- | :--- | :--- | :---: | :--- | :--- |
+| **Linux Hybrid (Raw DD)** | Implemented | 8 unit tests in `LinuxFlashingPipelineTest` | Not validated | 🟡 **Implemented — hardware validation pending** | Requires hybrid ISOs (MBR/GPT at Sector 0); controller write drops and OTG disconnect quirks not validated on physical media | [`LinuxRawDdStrategy.kt`](app/src/main/java/com/example/flasher/strategies/LinuxRawDdStrategy.kt), [`LinuxFlashingPipelineTest.kt`](app/src/test/java/com/example/LinuxFlashingPipelineTest.kt) |
+| **Windows UEFI Flasher** | Implemented | 8 unit tests in `WindowsUefiPipelineTest` | Not validated | 🟡 **Implemented — hardware validation pending** | Boot compatibility across diverse PC UEFI motherboards, split SWM discovery, and Secure Boot implementations not validated on physical media | [`WindowsUefiStrategy.kt`](app/src/main/java/com/example/flasher/strategies/WindowsUefiStrategy.kt), [`WindowsUefiPipelineTest.kt`](app/src/test/java/com/example/WindowsUefiPipelineTest.kt) |
+| **Ventoy Multi-Boot Engine** | Implemented | 9 unit tests in `VentoyPipelineTest` | Not validated | 🟡 **Implemented — hardware validation pending** | Dual-partition geometry verified in software; physical PC bootloader execution across legacy BIOS / UEFI motherboards not validated on physical media | [`VentoyStrategy.kt`](app/src/main/java/com/example/flasher/strategies/VentoyStrategy.kt), [`VentoyPipelineTest.kt`](app/src/test/java/com/example/VentoyPipelineTest.kt) |
+| **Non-Root USB Mass Storage Driver** | Implemented | Unit/mock tests in `FlashCoreUnitTest` | Not validated | 🟡 **Implemented — hardware validation pending** | Android USB API requires heap staging copy (`ByteArray`); caller short transfer validation on timeout gap; >2 TiB commands untested on physical media | [`UsbMassStorageDriver.kt`](app/src/main/java/com/example/usb/UsbMassStorageDriver.kt), [`FlashCoreUnitTest.kt`](app/src/test/java/com/example/FlashCoreUnitTest.kt) |
+| **Target Read-Back Verification** | Implemented | Unit/mock tests in `LinuxFlashingPipelineTest` | Not validated | 🟡 **Implemented — hardware validation pending** | Target-sector read-back verification engine; software validation performed against block-device test doubles, physical-media validation pending | [`FlashVerifier.kt`](app/src/main/java/com/example/flasher/verification/FlashVerifier.kt), [`LinuxFlashingPipelineTest.kt`](app/src/test/java/com/example/LinuxFlashingPipelineTest.kt) |
+| **Block Device Test Framework** | Implemented | 12 unit tests in `BlockDeviceFrameworkTest` | N/A (Software Test Double) | 🟢 **Implemented — software tested** | In-memory sparse and file-backed simulation; does not emulate physical controller hangs, power drops, or bus resets | [`BlockDevice.kt`](app/src/main/java/com/example/block/BlockDevice.kt), [`BlockDeviceFrameworkTest.kt`](app/src/test/java/com/example/BlockDeviceFrameworkTest.kt) |
+| **FAT32 Filesystem Writer** | Implemented | 9 unit tests in `Fat32WriterTest` | Not validated | 🟢 **Implemented — software tested** | Custom minimal FAT32 engine; lacks fsck/repair; cluster allocation not validated against physical OS mount drivers | [`Fat32Writer.kt`](app/src/main/java/com/example/fat32/Fat32Writer.kt), [`Fat32WriterTest.kt`](app/src/test/java/com/example/Fat32WriterTest.kt) |
+| **ISO Filesystem Engine** | Implemented | 6 unit tests in `IsoEngineTest` & `IsoFilesystemReaderTest` | N/A (Software Parser) | 🟢 **Implemented — software tested** | Supports ISO 9660 Level 1/2/3 and Joliet; no Rock Ridge POSIX permissions or pure UDF 2.60 support | [`IsoFilesystemReader.kt`](app/src/main/java/com/example/iso/IsoFilesystemReader.kt), [`IsoEngineTest.kt`](app/src/test/java/com/example/IsoEngineTest.kt) |
+| **Partition Subsystem** | Implemented | 9 unit tests in `PartitionEngineTest` | Not validated | 🟢 **Implemented — software tested** | MBR and GPT layout generation verified in memory; partition table detection not validated on physical drives | [`PartitionEngine.kt`](app/src/main/java/com/example/partition/PartitionEngine.kt), [`PartitionEngineTest.kt`](app/src/test/java/com/example/PartitionEngineTest.kt) |
+| **Android Production Engineering** | Implemented | 10 Robolectric tests in `AndroidProductionEngineeringTest` | Not validated | 🟡 **Implemented — hardware validation pending** | Foreground service and wake lock tested via Robolectric; synthetic benchmark/scalability harness; physical flash-drive performance and thermal telemetry not validated | [`FlashForegroundService.kt`](app/src/main/java/com/example/service/FlashForegroundService.kt), [`AndroidProductionEngineeringTest.kt`](app/src/test/java/com/example/AndroidProductionEngineeringTest.kt) |
+| **SPSC Direct Ring Buffer** | Implemented | 1 unit test in `FlashCoreUnitTest` | Not validated | 🟢 **Implemented — software tested** | Off-heap direct buffers reduce GC churn, but USB transfer path still includes a heap staging copy (not zero-copy); uses ReentrantLock | [`DirectRingBuffer.kt`](app/src/main/java/com/example/dsa/DirectRingBuffer.kt), [`FlashCoreUnitTest.kt`](app/src/test/java/com/example/FlashCoreUnitTest.kt) |
+| **CI & Release Infrastructure** | Workflows configured | Configured in `.github/workflows` | Not validated | 🟡 **Configured — no published releases** | GitHub Actions workflows configured for lint, test, and signing; no official release tags or published APKs exist yet | [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`.github/workflows/release.yml`](.github/workflows/release.yml) |
+
+> [!IMPORTANT]
+> **Status Definitions:**
+> - **Implemented — software tested:** Complete code implementation covered by automated offline unit tests on software abstractions.
+> - **Implemented — hardware validation pending:** Software pipeline is implemented and passes software test suites, but requires empirical validation on physical USB flash drives, OTG cables, or PC UEFI/BIOS motherboards.
+> - **Production-grade:** Reserved strictly for features backed by both comprehensive software tests AND empirical physical hardware/device matrix validation.
 
 See [`LIMITATIONS.md`](LIMITATIONS.md) for transparent hardware boundaries and firmware considerations.
 
 ---
 
-## 📂 Multi-Module Roadmap & Package Namespace
+## 📂 Architecture & Package Namespace Status
 
-To ensure long-term maintainability, the project is structured to transition from a single application module into modular subprojects with a clean domain namespace:
+The codebase is currently organized as a single application module (`:app`) under the package namespace `com.example.*`. A modular architecture and namespace migration are planned for upcoming milestones:
 
 ```text
 flashcore/
-├── app/                        # Android UI, ViewModels, Compose, ForegroundService
-├── core/
-│   ├── blockdevice/            # BlockDevice interface, Memory & Fault-injecting devices
-│   ├── scsi/                   # CBW/CSW protocol, SCSI command builder, sense parser
-│   ├── usb/                    # UsbMassStorageDriver, Android UsbManager host driver
-│   ├── partition/              # MBR, GPT, GUIDs, CRC32 builders
-│   ├── filesystem/             # FAT32 formatter, cluster allocator, directory parser
-│   ├── iso/                    # ISO 9660, Joliet, El Torito parser and extractor
-│   └── verification/           # FlashVerifier, checksum engines, read-back validators
-├── flashers/
-│   ├── linux/                  # LinuxRawDdStrategy and hybrid verification
-│   ├── windows/                # WindowsUefiStrategy, WIM splitter, BCD generator
-│   └── ventoy/                 # VentoyStrategy, dual-partition installer, update engine
-├── native/                     # (Optional future) C++17 accelerated routines / wimlib
-└── test/                       # Shared fixtures, test images, hardware test harnesses
+├── app/                        # Current single module (UI, ViewModels, Compose, Drivers, Flashing engines)
+│   └── src/main/java/com/example/
+│       ├── block/              # BlockDevice abstraction and test doubles
+│       ├── dsa/                # DirectRingBuffer, WimChunker, IsoTrieParser
+│       ├── fat32/              # FAT32 formatting and file writing
+│       ├── flasher/            # Flashing strategies (Linux, Windows, Ventoy) and verification
+│       ├── iso/                # ISO 9660 & Joliet filesystem reader
+│       ├── partition/          # MBR, GPT, GUID builders
+│       ├── scsi/               # SCSI CDB builder and CBW/CSW protocols
+│       ├── service/            # Android ForegroundService and wake lock
+│       ├── ui/                 # Jetpack Compose UI components and ViewModel
+│       └── usb/                # Android USB Host Mass Storage driver
 ```
 
-> **Namespace Migration:** Legacy internal packages under `com.example.*` are being migrated to `com.ashishsinghbora.flashcore` across modules to reflect production-grade project ownership.
+> **Namespace Migration Status:** Source code currently resides in `com.example.*`. Migration to `com.ashishsinghbora.flashcore` alongside multi-module extraction (`:core`, `:flashers`, `:app`) is planned in future architectural refactoring.
 
 ---
 
 ## 📱 System Requirements
 
-* **Android Version:** Android 8.0 (API Level 26) or higher (tested up to Android 15 / API 36).
-* **Hardware:** USB On-The-Go (OTG) support.
+* **Android Version:** Android 8.0 (API Level 26) or higher (target SDK: Android 15 / API 36).
+* **Hardware:** USB On-The-Go (OTG) host controller support.
 * **Accessories:** USB Type-C or Micro-USB OTG adapter + USB flash drive.
-* **Root Privileges:** **None.** Operates entirely within standard Android user-space USB Host permissions.
+* **Root Privileges:** **None.** Operates within standard Android user-space USB Host permissions.
 
 ---
 
@@ -149,13 +155,13 @@ flashcore/
 3. **Android Build Tools 36.0.0+**
 
 ### Local Verification Pipeline
-Before submitting code, run the standard quality verification pipeline:
+When building in an environment configured with JDK 21 and Android SDK:
 
 ```bash
 # 1. Run Android Lint
 ./gradlew lint
 
-# 2. Run automated test suite (80+ unit and Robolectric tests)
+# 2. Run automated test suite (92 JVM/Robolectric unit tests)
 ./gradlew test
 
 # 3. Assemble Debug APK
@@ -165,28 +171,30 @@ Before submitting code, run the standard quality verification pipeline:
 ./gradlew assembleRelease
 ```
 
+### Automated Test Suite Details
+The repository contains **93 automated test methods** across 14 test files:
+- **92 Unit & Robolectric tests** in `app/src/test` (across 13 test files): Covering block device doubles, SCSI CDB construction, FAT32 formatting/allocation, ISO 9660 parsing, GPT/MBR partition engines, Linux/Windows/Ventoy strategies, and foreground service lifecycle.
+- **1 Instrumentation test** in `app/src/androidTest`: Context verification (`ExampleInstrumentedTest.kt`).
+- **Physical Hardware Tests:** 0. (All tests run against mock/in-memory abstractions; physical USB hardware and PC boot testing are not automated in CI).
+
 ---
 
-## 🔄 Reproducible Builds & Verification
+## 🔄 Release Engineering & Reproducibility
 
-FlashCore supports deterministic, reproducible builds. Anyone building the source code with the reference toolchain can reproduce bit-for-bit identical release APKs.
+FlashCore includes build scripts and GitHub Actions workflows designed to support deterministic and reproducible builds.
 
-Every official GitHub Release includes:
-- Signed Release APK (`flashcore-vX.Y.Z-release.apk`)
-- SHA-256 Checksums (`SHA256SUMS.txt`)
+### Current Release Status
+* **Published Releases:** **None.** No public release tags (e.g. `v1.0.0`) or release APK binaries have been published yet.
+* **Workflow Automation:** Build and release workflows are configured in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) and [`.github/workflows/release.yml`](.github/workflows/release.yml).
+* **Future Releases:** Official releases will publish signed APKs along with corresponding `SHA256SUMS.txt` digests.
 
-To verify the integrity of a downloaded release:
-```bash
-sha256sum -c SHA256SUMS.txt
-```
-
-Read [`REPRODUCIBLE_BUILDS.md`](REPRODUCIBLE_BUILDS.md) for full reproduction steps and `diffoscope` verification details.
+Read [`REPRODUCIBLE_BUILDS.md`](REPRODUCIBLE_BUILDS.md) for details on build determinism and verification instructions.
 
 ---
 
 ## 🤝 Contributing
 
-Contributions, bug reports, and hardware compatibility reports are welcome! 
+Contributions, bug reports, and especially physical hardware compatibility reports are welcome!
 
 Please read our contributing guides before opening a PR:
 * 📘 [Contributor Guide (`CONTRIBUTING.md`)](CONTRIBUTING.md)
@@ -204,5 +212,5 @@ Distributed under the **GNU General Public License v3.0 (GPL-3.0)**. See [`LICEN
 ### Third-Party Attribution
 * **Ventoy**: Copyright (C) 2019-2024 longpanda `<admin@ventoy.net>`. Licensed under GPL-3.0. Source code available at [https://github.com/ventoy/Ventoy](https://github.com/ventoy/Ventoy).
 * **GRUB2**: Copyright (C) Free Software Foundation, Inc. Licensed under GPL-3.0.
-* **Disclaimer**: FlashCore is an independent open-source implementation. It is not affiliated with, endorsed by, or sponsored by Microsoft, Canonical, or the Ventoy project.
-* **Data Loss Warning**: Flashing an image permanently overwrites existing data on the chosen USB device. Always confirm target drive capacity and serial numbers before proceeding.
+* **Disclaimer**: FlashCore is an independent open-source project. It is not affiliated with, endorsed by, or sponsored by Microsoft, Canonical, or the Ventoy project.
+* **Data Loss Warning**: Flashing an image permanently overwrites data on the target USB storage device. Always confirm target drive capacity and serial numbers before flashing.
