@@ -13,6 +13,8 @@ import com.ashishsinghbora.flashcore.block.DeviceDisconnectedException
 import com.ashishsinghbora.flashcore.scsi.CommandBlockWrapper
 import com.ashishsinghbora.flashcore.scsi.CommandStatusWrapper
 import com.ashishsinghbora.flashcore.scsi.ScsiCdbBuilder
+import com.ashishsinghbora.flashcore.scsi.ScsiCheckConditionException
+import com.ashishsinghbora.flashcore.scsi.ScsiCommandResult
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.locks.ReentrantLock
@@ -56,6 +58,12 @@ class UsbMassStorageDriver(
     private val cswBuffer = ByteArray(CommandStatusWrapper.CSW_SIZE)
 
     var diskInfo: UsbDiskInfo? = null
+        private set
+
+    var lastSenseData: ScsiCdbBuilder.SenseDataResponse? = null
+        private set
+
+    var lastCommandResult: ScsiCommandResult? = null
         private set
 
     override val isConnected: Boolean
@@ -235,7 +243,8 @@ class UsbMassStorageDriver(
         dataOffset: Int = 0,
         dataLength: Int = 0,
         timeoutMs: Int = DEFAULT_TIMEOUT_MS,
-        autoRequestSense: Boolean = true
+        autoRequestSense: Boolean = true,
+        maxRetries: Int = MAX_RETRIES
     ): CommandStatusWrapper {
         checkDeviceConnected()
         val conn = connection ?: throw DeviceDisconnectedException("USB Driver is not connected")
@@ -243,7 +252,7 @@ class UsbMassStorageDriver(
         val inEp = inEndpoint
 
         var attempt = 0
-        while (attempt < MAX_RETRIES) {
+        while (attempt < maxRetries) {
             attempt++
             try {
                 checkDeviceConnected()
@@ -326,50 +335,93 @@ class UsbMassStorageDriver(
                     )
                 }
 
-                if (csw.isFailed && autoRequestSense) {
-                    try {
-                        val sense = requestSenseInternal()
-                        Log.w(TAG, "SCSI Command Failed: SenseKey=${sense.senseKeyDescription} (0x${Integer.toHexString(sense.senseKey)}), ASC=${sense.ascDescription}")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Auto REQUEST SENSE query failed: ${e.message}")
+                if (csw.isFailed) {
+                    var sense: ScsiCdbBuilder.SenseDataResponse? = null
+                    var reqSenseFailed = false
+                    var reqSenseError: String? = null
+
+                    if (autoRequestSense) {
+                        val senseRes = requestSenseInternal(cbw.lun)
+                        sense = senseRes.senseData
+                        reqSenseFailed = senseRes.failed
+                        reqSenseError = senseRes.errorMessage
+
+                        if (sense != null && sense.responseCode != 0) {
+                            val opName = if (cbw.cdb.isNotEmpty()) ScsiCdbBuilder.getOpcodeName(cbw.cdb[0]) else "UNKNOWN"
+                            Log.w(TAG, "SCSI Command $opName returned CHECK CONDITION: [${sense.senseKeyDescription}] ${sense.ascDescription} (Key=0x${Integer.toHexString(sense.senseKey)}, ASC=0x${Integer.toHexString(sense.additionalSenseCode).padStart(2, '0')}, ASCQ=0x${Integer.toHexString(sense.additionalSenseCodeQualifier).padStart(2, '0')})")
+                        } else if (reqSenseFailed) {
+                            Log.w(TAG, "SCSI Command returned CHECK CONDITION but automatic REQUEST SENSE failed: $reqSenseError")
+                        }
                     }
+
+                    lastSenseData = sense
+                    val cswWithSense = csw.copy(
+                        senseData = sense,
+                        requestSenseFailed = reqSenseFailed,
+                        requestSenseError = reqSenseError
+                    )
+                    lastCommandResult = ScsiCommandResult(cswWithSense)
+                    return cswWithSense
                 }
 
+                lastSenseData = null
+                lastCommandResult = ScsiCommandResult(csw)
                 return csw
             } catch (e: Exception) {
                 if (e is DeviceDisconnectedException) throw e
                 Log.w(TAG, "BOT Transaction failed on attempt $attempt: ${e.message}")
-                if (attempt >= MAX_RETRIES) {
+                if (attempt >= maxRetries) {
                     throw if (e is IOException) e else IOException("BOT Transaction exhausted retries", e)
                 }
                 Thread.sleep((100L * attempt))
             }
         }
 
-        throw IOException("BOT Transaction failed after $MAX_RETRIES attempts")
+        throw IOException("BOT Transaction failed after $maxRetries attempts")
     }
+
+    data class InternalSenseResult(
+        val senseData: ScsiCdbBuilder.SenseDataResponse?,
+        val failed: Boolean = false,
+        val errorMessage: String? = null
+    )
 
     /**
      * Internal implementation of REQUEST SENSE without auto-recovery recursion.
+     * Guaranteed to never recurse: passes autoRequestSense = false.
      */
-    private fun requestSenseInternal(): ScsiCdbBuilder.SenseDataResponse {
-        val cdb = ScsiCdbBuilder.requestSense(18)
-        val buffer = ByteArray(18)
-        val cbw = CommandBlockWrapper.create(18, CommandBlockWrapper.Direction.DATA_IN, cdb)
-        val csw = executeBotTransaction(cbw, buffer, 0, 18, autoRequestSense = false)
-        return if (csw.isSuccess) {
-            ScsiCdbBuilder.parseRequestSense(buffer)
-        } else {
-            ScsiCdbBuilder.parseRequestSense(ByteArray(0))
+    private fun requestSenseInternal(lun: Byte = 0): InternalSenseResult {
+        return try {
+            val cdb = ScsiCdbBuilder.requestSense(18, lun = lun)
+            val buffer = ByteArray(18)
+            val cbw = CommandBlockWrapper.create(18, CommandBlockWrapper.Direction.DATA_IN, cdb, lun = lun)
+            val csw = executeBotTransaction(cbw, buffer, 0, 18, autoRequestSense = false, maxRetries = 1)
+            if (csw.isSuccess) {
+                val parsed = ScsiCdbBuilder.parseRequestSense(buffer)
+                InternalSenseResult(senseData = parsed, failed = false)
+            } else {
+                InternalSenseResult(
+                    senseData = null,
+                    failed = true,
+                    errorMessage = "REQUEST SENSE CSW failed with status ${csw.status}"
+                )
+            }
+        } catch (e: Exception) {
+            InternalSenseResult(
+                senseData = null,
+                failed = true,
+                errorMessage = "REQUEST SENSE transport error: ${e.message}"
+            )
         }
     }
 
     /**
      * Issues SCSI REQUEST SENSE (0x03) to retrieve sense key and ASC/ASCQ details.
      */
-    fun requestSense(): ScsiCdbBuilder.SenseDataResponse {
+    fun requestSense(lun: Byte = 0): ScsiCdbBuilder.SenseDataResponse {
         return ioLock.withLock {
-            requestSenseInternal()
+            val res = requestSenseInternal(lun)
+            res.senseData ?: ScsiCdbBuilder.parseRequestSense(ByteArray(0))
         }
     }
 
@@ -492,12 +544,29 @@ class UsbMassStorageDriver(
                 )
             }
             if (csw.isFailed) {
-                try {
-                    val sense = requestSenseInternal()
-                    Log.w(TAG, "Write failed at LBA $lba: SenseKey=${sense.senseKeyDescription}, ASC=${sense.ascDescription}")
-                } catch (e: Exception) {
-                    Log.w(TAG, "Sense query after write failure failed: ${e.message}")
+                val opcode = if (lba > 0xFFFFFFFFL || blockCount > 0xFFFF) ScsiCdbBuilder.OP_WRITE_16 else ScsiCdbBuilder.OP_WRITE_10
+                val senseRes = requestSenseInternal(cbw.lun)
+                val sense = senseRes.senseData
+                val reqSenseFailed = senseRes.failed
+                val reqSenseError = senseRes.errorMessage
+
+                if (sense != null && sense.responseCode != 0) {
+                    val opName = ScsiCdbBuilder.getOpcodeName(opcode)
+                    Log.w(TAG, "Write failed at LBA $lba ($opName) with CHECK CONDITION: [${sense.senseKeyDescription}] ${sense.ascDescription}")
+                } else if (reqSenseFailed) {
+                    Log.w(TAG, "Write failed at LBA $lba with CHECK CONDITION but REQUEST SENSE failed: $reqSenseError")
                 }
+
+                lastSenseData = sense
+                val cswWithSense = csw.copy(
+                    senseData = sense,
+                    requestSenseFailed = reqSenseFailed,
+                    requestSenseError = reqSenseError
+                )
+                lastCommandResult = ScsiCommandResult(cswWithSense)
+            } else {
+                lastSenseData = null
+                lastCommandResult = ScsiCommandResult(csw)
             }
             csw.isSuccess
         }
@@ -525,6 +594,16 @@ class UsbMassStorageDriver(
             val cbw = CommandBlockWrapper.create(36, CommandBlockWrapper.Direction.DATA_IN, cdb)
             val csw = executeBotTransaction(cbw, buffer, 0, 36)
             if (!csw.isSuccess) {
+                if (csw.isCheckCondition) {
+                    throw ScsiCheckConditionException(
+                        opcode = ScsiCdbBuilder.OP_INQUIRY,
+                        commandName = "INQUIRY",
+                        csw = csw,
+                        senseData = csw.senseData,
+                        requestSenseFailed = csw.requestSenseFailed,
+                        requestSenseError = csw.requestSenseError
+                    )
+                }
                 throw IOException("SCSI INQUIRY failed with CSW status: ${csw.status}")
             }
             ScsiCdbBuilder.parseInquiry(buffer)
@@ -541,6 +620,16 @@ class UsbMassStorageDriver(
             val cbw = CommandBlockWrapper.create(8, CommandBlockWrapper.Direction.DATA_IN, cdb)
             val csw = executeBotTransaction(cbw, buffer, 0, 8)
             if (!csw.isSuccess) {
+                if (csw.isCheckCondition) {
+                    throw ScsiCheckConditionException(
+                        opcode = ScsiCdbBuilder.OP_READ_CAPACITY_10,
+                        commandName = "READ_CAPACITY_10",
+                        csw = csw,
+                        senseData = csw.senseData,
+                        requestSenseFailed = csw.requestSenseFailed,
+                        requestSenseError = csw.requestSenseError
+                    )
+                }
                 throw IOException("SCSI READ_CAPACITY_10 failed with CSW status: ${csw.status}")
             }
             val cap10 = ScsiCdbBuilder.parseReadCapacity10(buffer)
@@ -598,6 +687,113 @@ class UsbMassStorageDriver(
             val csw = executeBotTransaction(cbw, srcBuffer, offset, totalBytes, WRITE_TIMEOUT_MS)
             csw.isSuccess
         }
+    }
+
+    /**
+     * Executes an arbitrary SCSI command over USB Bulk-Only Transport (BOT).
+     * Automatically handles CHECK CONDITION by issuing REQUEST SENSE.
+     */
+    @Throws(IOException::class)
+    fun executeScsiCommand(
+        cbw: CommandBlockWrapper,
+        dataBuffer: ByteArray? = null,
+        dataOffset: Int = 0,
+        dataLength: Int = 0,
+        timeoutMs: Int = DEFAULT_TIMEOUT_MS,
+        autoRequestSense: Boolean = true
+    ): ScsiCommandResult {
+        return ioLock.withLock {
+            val csw = executeBotTransaction(cbw, dataBuffer, dataOffset, dataLength, timeoutMs, autoRequestSense)
+            ScsiCommandResult(csw)
+        }
+    }
+
+    /**
+     * Reads sector blocks, throwing [ScsiCheckConditionException] if the device returns CHECK CONDITION.
+     */
+    @Throws(IOException::class, ScsiCheckConditionException::class)
+    fun readBlocksOrThrow(lba: Long, blockCount: Int, destBuffer: ByteArray, offset: Int = 0): Boolean {
+        return ioLock.withLock {
+            val sectorSize = diskInfo?.sectorSizeBytes ?: 512
+            val totalBytes = blockCount * sectorSize
+            val cdb = if (lba > 0xFFFFFFFFL || blockCount > 0xFFFF) {
+                ScsiCdbBuilder.read16(lba, blockCount.toLong())
+            } else {
+                ScsiCdbBuilder.read10(lba, blockCount)
+            }
+            val cbw = CommandBlockWrapper.create(totalBytes, CommandBlockWrapper.Direction.DATA_IN, cdb)
+            val csw = executeBotTransaction(cbw, destBuffer, offset, totalBytes)
+            if (csw.isCheckCondition) {
+                throw ScsiCheckConditionException(
+                    opcode = cdb[0],
+                    commandName = ScsiCdbBuilder.getOpcodeName(cdb[0]),
+                    csw = csw,
+                    senseData = csw.senseData,
+                    requestSenseFailed = csw.requestSenseFailed,
+                    requestSenseError = csw.requestSenseError
+                )
+            }
+            csw.isSuccess
+        }
+    }
+
+    /**
+     * Writes sector blocks, throwing [ScsiCheckConditionException] if the device returns CHECK CONDITION.
+     */
+    @Throws(IOException::class, ScsiCheckConditionException::class)
+    fun writeBlocksOrThrow(lba: Long, blockCount: Int, srcBuffer: ByteArray, offset: Int = 0): Boolean {
+        return ioLock.withLock {
+            val sectorSize = diskInfo?.sectorSizeBytes ?: 512
+            val totalBytes = blockCount * sectorSize
+            val cdb = if (lba > 0xFFFFFFFFL || blockCount > 0xFFFF) {
+                ScsiCdbBuilder.write16(lba, blockCount.toLong())
+            } else {
+                ScsiCdbBuilder.write10(lba, blockCount)
+            }
+            val cbw = CommandBlockWrapper.create(totalBytes, CommandBlockWrapper.Direction.DATA_OUT, cdb)
+            val csw = executeBotTransaction(cbw, srcBuffer, offset, totalBytes, WRITE_TIMEOUT_MS)
+            if (csw.isCheckCondition) {
+                throw ScsiCheckConditionException(
+                    opcode = cdb[0],
+                    commandName = ScsiCdbBuilder.getOpcodeName(cdb[0]),
+                    csw = csw,
+                    senseData = csw.senseData,
+                    requestSenseFailed = csw.requestSenseFailed,
+                    requestSenseError = csw.requestSenseError
+                )
+            }
+            csw.isSuccess
+        }
+    }
+
+    /**
+     * Writes direct buffer, throwing [ScsiCheckConditionException] if the device returns CHECK CONDITION.
+     */
+    @Throws(IOException::class, ScsiCheckConditionException::class)
+    fun writeDirectBufferOrThrow(
+        lba: Long,
+        blockCount: Int,
+        directBuffer: ByteBuffer,
+        offset: Int,
+        length: Int,
+        timeoutMs: Int = WRITE_TIMEOUT_MS
+    ): Boolean {
+        val success = writeDirectBuffer(lba, blockCount, directBuffer, offset, length, timeoutMs)
+        if (!success) {
+            val res = lastCommandResult
+            if (res != null && res.isCheckCondition) {
+                val opcode = if (lba > 0xFFFFFFFFL || blockCount > 0xFFFF) ScsiCdbBuilder.OP_WRITE_16 else ScsiCdbBuilder.OP_WRITE_10
+                throw ScsiCheckConditionException(
+                    opcode = opcode,
+                    commandName = ScsiCdbBuilder.getOpcodeName(opcode),
+                    csw = res.csw,
+                    senseData = res.senseData,
+                    requestSenseFailed = res.requestSenseFailed,
+                    requestSenseError = res.requestSenseError
+                )
+            }
+        }
+        return success
     }
 
     /**

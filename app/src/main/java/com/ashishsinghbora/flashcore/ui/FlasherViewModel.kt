@@ -210,7 +210,7 @@ class FlasherViewModel(
             val currentSelected = _uiState.value.selectedDevice
             val selected = when {
                 autoSelectDevice != null -> diskList.find { it.device == autoSelectDevice } ?: diskList.firstOrNull()
-                currentSelected != null -> diskList.find { it.serialNumber == currentSelected.serialNumber } ?: diskList.firstOrNull()
+                currentSelected != null -> diskList.find { it.serialNumber == currentSelected.serialNumber } ?: if (currentSelected.device == null) currentSelected else diskList.firstOrNull()
                 else -> diskList.firstOrNull()
             }
 

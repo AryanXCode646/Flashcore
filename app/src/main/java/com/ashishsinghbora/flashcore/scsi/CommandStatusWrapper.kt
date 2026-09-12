@@ -17,7 +17,10 @@ data class CommandStatusWrapper(
     val signature: Int,
     val tag: Int,
     val dataResidue: Int,
-    val status: Status
+    val status: Status,
+    val senseData: ScsiCdbBuilder.SenseDataResponse? = null,
+    val requestSenseFailed: Boolean = false,
+    val requestSenseError: String? = null
 ) {
     enum class Status(val code: Byte) {
         PASSED(0x00.toByte()),
@@ -33,6 +36,7 @@ data class CommandStatusWrapper(
     val isSuccess: Boolean get() = status == Status.PASSED
     val isPhaseError: Boolean get() = status == Status.PHASE_ERROR
     val isFailed: Boolean get() = status == Status.FAILED
+    val isCheckCondition: Boolean get() = status == Status.FAILED
 
     companion object {
         const val CSW_SIGNATURE = 0x53425355 // "USBS" in Little-Endian

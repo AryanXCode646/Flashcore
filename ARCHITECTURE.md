@@ -198,12 +198,13 @@ All layers currently reside within the `app` module under `com.example.*`.
     - **Sector Corruption:** Emulates bit-rot and transmission corruption on read and write paths for verification engine testing without corrupting caller buffers.
 
 ### Layer 7: Hardware Transport & SCSI Driver
-* **Components:** `UsbMassStorageDriver`, `CommandBlockWrapper` (CBW), `CommandStatusWrapper` (CSW), `ScsiCdbBuilder`.
+* **Components:** `UsbMassStorageDriver`, `CommandBlockWrapper` (CBW), `CommandStatusWrapper` (CSW), `ScsiCdbBuilder`, `ScsiCheckConditionException`, `ScsiCommandResult`.
 * **Responsibilities:**
   - Interacts with Android's `UsbManager` and `UsbDeviceConnection`.
   - Implements SCSI Bulk-Only Transport (BOT, USB Mass Storage Class specification).
   - Encapsulates SCSI commands in 31-byte CBWs, executes bulk IN/OUT data transfers, and evaluates 13-byte CSWs.
   - Supports standard SCSI command set: `INQUIRY` (0x12), `READ_CAPACITY_10` (0x25), `READ_CAPACITY_16` (0x9E), `READ_10` (0x28), `WRITE_10` (0x2A), `READ_16` (0x88), `WRITE_16` (0x8A), `SYNCHRONIZE_CACHE_10` (0x35), `REQUEST_SENSE` (0x03), `MODE_SENSE_6` (0x1A).
+  - Automatically intercepts SCSI `CHECK CONDITION` (`bCSWStatus == 0x01`), issues SCSI `REQUEST SENSE` (opcode 0x03), parses fixed (0x70/0x71) and descriptor (0x72/0x73) sense data, and attaches structured diagnostics (`SenseDataResponse`, `ScsiCheckConditionException`, `ScsiCommandResult`) without recursive recovery loops.
   - Handles endpoint halt clearing (`CLEAR_FEATURE`) and Bulk-Only Mass Storage Reset (BOMSR).
 
 ---
