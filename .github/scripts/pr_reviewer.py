@@ -2,7 +2,8 @@
 """
 FlashCore Autonomous AI Pull Request Code Reviewer.
 
-Inspects PR code diffs using Google GenAI SDK (gemini-2.5-flash) and posts
+Inspects PR code diffs using Google GenAI SDK (gemini-2.5-flash with automatic
+resilient fallback to gemini-3.6-flash/gemini-2.0-flash) and posts
 constructive, high-signal security, concurrency, correctness, and architectural
 feedback directly onto the GitHub Pull Request.
 """
@@ -127,7 +128,6 @@ def filter_diff(diff_text: str, max_chars: int = 80000) -> tuple[str, bool]:
 
     for line in lines:
         if line.startswith("diff --git"):
-            # Check file extension
             skip_current_file = any(line.endswith(ext) for ext in [
                 ".png", ".jpg", ".webp", ".ico", ".svg", ".jar", ".jks", ".keystore",
                 "gradle-wrapper.jar", "package-lock.json"
@@ -144,8 +144,8 @@ def filter_diff(diff_text: str, max_chars: int = 80000) -> tuple[str, bool]:
     return result, is_truncated
 
 
-def generate_review(client: "genai.Client", model_name: str, pr_info: dict, diff_text: str) -> str:
-    """Generate constructive review using Gemini 2.5 Flash."""
+def generate_review(client: "genai.Client", primary_model: str, pr_info: dict, diff_text: str) -> tuple[str, str]:
+    """Generate constructive review using Gemini with automatic fallback if a model is deprecated."""
     prompt = f"""
 Pull Request #{pr_info.get('number', 'N/A')}: {pr_info.get('title', 'Unknown')}
 Author: {pr_info.get('author', 'Unknown')}
@@ -159,22 +159,38 @@ Below is the unified git diff of this pull request:
 
 Please execute your autonomous review following the specified criteria and formatting.
 """
-    try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.2,
-                top_p=0.95,
-                system_instruction=REVIEW_SYSTEM_INSTRUCTION
+    candidate_models = [primary_model]
+    for m in ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+        if m not in candidate_models:
+            candidate_models.append(m)
+
+    last_error = None
+    for model_name in candidate_models:
+        try:
+            print(f"[*] Calling Gemini model '{model_name}'...")
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    top_p=0.95,
+                    system_instruction=REVIEW_SYSTEM_INSTRUCTION
+                )
             )
-        )
-        return response.text or "No review generated."
-    except Exception as e:
-        return f"Error executing Gemini review: {e}"
+            if response and response.text:
+                return response.text, model_name
+        except Exception as e:
+            err_str = str(e)
+            last_error = e
+            print(f"[!] Model '{model_name}' invocation failed: {err_str}")
+            if "NOT_FOUND" in err_str or "no longer available" in err_str or "404" in err_str:
+                continue
+            else:
+                break
+    return f"Error executing Gemini review: {last_error}", candidate_models[-1]
 
 
-def post_or_update_pr_comment(repo: str, pr_number: int, token: str, review_body: str) -> None:
+def post_or_update_pr_comment(repo: str, pr_number: int, token: str, review_body: str, model_used: str) -> None:
     """Post or update review comment on the PR."""
     headers = {
         "Authorization": f"token {token}",
@@ -184,7 +200,7 @@ def post_or_update_pr_comment(repo: str, pr_number: int, token: str, review_body
     url_comments = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
 
     # Prepend tag to review body for idempotency
-    tagged_body = f"{PR_REVIEW_TAG}\n{review_body}\n\n---\n*Reviewed autonomously by Gemini 2.5 Flash via `google-genai` SDK.*"
+    tagged_body = f"{PR_REVIEW_TAG}\n{review_body}\n\n---\n*Reviewed autonomously by `{model_used}` via `google-genai` SDK.*"
 
     try:
         res = requests.get(url_comments, headers=headers, timeout=15)
@@ -293,6 +309,7 @@ def main():
 
     print(f"[✓] Diff prepared ({len(filtered_diff)} characters, truncated={is_truncated}).")
 
+    model_used = args.model
     if args.dry_run:
         print("[*] Running in DRY-RUN mode.")
         review_output = "### 🤖 FlashCore AI PR Review (DRY RUN)\nMock verification completed successfully."
@@ -301,8 +318,8 @@ def main():
             print("[!] google-genai library missing. Install via pip install google-genai.")
             sys.exit(1)
         client = genai.Client(api_key=api_key)
-        print(f"[*] Analyzing diff with {args.model}...")
-        review_output = generate_review(client, args.model, pr_metadata, filtered_diff)
+        print(f"[*] Analyzing diff with {args.model} (with resilient model fallback)...")
+        review_output, model_used = generate_review(client, args.model, pr_metadata, filtered_diff)
 
     # Output to stdout
     print("\n--- GENERATED REVIEW ---\n")
@@ -311,9 +328,9 @@ def main():
 
     # Post comment to PR
     if token and repo and pr_number and not args.dry_run:
-        post_or_update_pr_comment(repo, pr_number, token, review_output)
+        post_or_update_pr_comment(repo, pr_number, token, review_output, model_used)
 
-    write_step_summary(f"{review_output}\n\n*(Diff characters reviewed: {len(filtered_diff)})*")
+    write_step_summary(f"{review_output}\n\n*(Diff characters reviewed: {len(filtered_diff)}, Model: `{model_used}`)*")
     print("[✓] PR review workflow finished successfully.")
 
 

@@ -46,12 +46,21 @@ def audit_codebase_snippet(file_path: str):
     Provide specific P0/P1/P2 issues found and concrete remediation steps.
     """
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt
-    )
-    print(f"--- Audit Report for {file_path} ---\n")
-    print(response.text)
+    for model_name in ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt
+            )
+            print(f"--- Audit Report for {file_path} ({model_name}) ---\n")
+            print(response.text)
+            return
+        except Exception as e:
+            err = str(e)
+            if "NOT_FOUND" in err or "no longer available" in err or "404" in err:
+                continue
+            print(f"Error calling {model_name}: {e}")
+            return
 
 
 if __name__ == "__main__":

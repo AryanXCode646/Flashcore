@@ -2,8 +2,9 @@
 """
 FlashCore Autonomous Codebase Auditor & Security Inspector.
 
-Scans the FlashCore codebase, leverages Google GenAI SDK (gemini-2.5-flash),
-and performs deep static and architectural analysis across:
+Scans the FlashCore codebase, leverages Google GenAI SDK (gemini-2.5-flash with
+resilient fallback to gemini-3.6-flash / gemini-2.0-flash), and performs deep
+static and architectural analysis across:
 1. Security Flaws (SSRF, raw block device bounds, path traversal, permission exposure)
 2. Race Conditions & Concurrency (Kotlin coroutines, ring buffer pointers, USB bulk async)
 3. Memory & Resource Leaks (DirectByteBuffer off-heap allocations, USB interface unbinding, streams)
@@ -157,8 +158,8 @@ def bundle_code_content(repo_root: Path, file_paths: list[Path], max_chars_per_f
     return "\n".join(bundle)
 
 
-def run_gemini_audit(client: "genai.Client", model_name: str, subsystem_key: str, sub_info: dict, code_bundle: str) -> str:
-    """Invoke Gemini model via google-genai SDK to audit the subsystem code bundle."""
+def run_gemini_audit(client: "genai.Client", primary_model: str, subsystem_key: str, sub_info: dict, code_bundle: str) -> tuple[str, str]:
+    """Invoke Gemini model via google-genai SDK to audit the subsystem code bundle with resilient fallback."""
     prompt = f"""
 Audit Subsystem: {sub_info['title']} ({subsystem_key})
 Description: {sub_info['description']}
@@ -169,19 +170,34 @@ The source files belonging to this subsystem are provided below:
 
 Please execute your thorough security, concurrency, memory, correctness, and architectural review now.
 """
-    try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.2,
-                top_p=0.95,
-                system_instruction=SYSTEM_INSTRUCTION
+    candidate_models = [primary_model]
+    for m in ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+        if m not in candidate_models:
+            candidate_models.append(m)
+
+    last_error = None
+    for model_name in candidate_models:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    top_p=0.95,
+                    system_instruction=SYSTEM_INSTRUCTION
+                )
             )
-        )
-        return response.text or "No response received from model."
-    except Exception as e:
-        return f"Error executing Gemini audit for subsystem {subsystem_key}: {e}"
+            if response and response.text:
+                return response.text, model_name
+        except Exception as e:
+            err_str = str(e)
+            last_error = e
+            print(f"[!] Model '{model_name}' audit failed for subsystem {subsystem_key}: {err_str}")
+            if "NOT_FOUND" in err_str or "no longer available" in err_str or "404" in err_str:
+                continue
+            else:
+                break
+    return f"Error executing Gemini audit for subsystem {subsystem_key}: {last_error}", candidate_models[-1]
 
 
 def post_or_update_github_issue(repo: str, token: str, report_content: str) -> None:
@@ -314,7 +330,7 @@ def main():
     report_sections = [
         "# FlashCore Autonomous Codebase Security & Quality Audit Report\n",
         f"- **Audit Date**: {audit_timestamp}",
-        f"- **Model**: `{args.model}` (`google-genai` SDK)",
+        f"- **Configured Model**: `{args.model}` (`google-genai` SDK)",
         f"- **Repository**: `{os.environ.get('GITHUB_REPOSITORY', repo_root.name)}`",
         f"- **Execution Mode**: `{'DRY RUN (Offline Verification)' if args.dry_run else 'ACTIVE GENAI SCAN'}`\n",
         "## 1. Executive Summary & Inventory\n",
@@ -328,6 +344,7 @@ def main():
     subsystem_results = {}
     total_files = 0
     has_critical_p0 = False
+    effective_model = args.model
 
     for sub_key in selected_subsystems:
         sub_info = SUBSYSTEM_MAP[sub_key]
@@ -344,11 +361,12 @@ def main():
             content_summary += "\n*Dry-run complete: Set GEMINI_API_KEY to trigger autonomous LLM security & concurrency audit.*\n"
             subsystem_results[sub_key] = content_summary
         else:
-            print(f"[*] Analyzing subsystem [{sub_key}] via Gemini 2.5 Flash...")
+            print(f"[*] Analyzing subsystem [{sub_key}] via Gemini 2.5 Flash (with fallback)...")
             code_bundle = bundle_code_content(repo_root, files)
-            audit_res = run_gemini_audit(client, args.model, sub_key, sub_info, code_bundle)
-            subsystem_results[sub_key] = f"### {sub_info['title']}\n\n{audit_res}\n"
-            status_text = "AUDITED (COMPLETED)"
+            audit_res, model_used = run_gemini_audit(client, args.model, sub_key, sub_info, code_bundle)
+            effective_model = model_used
+            subsystem_results[sub_key] = f"### {sub_info['title']}\n\n*Audited by `{model_used}`*\n\n{audit_res}\n"
+            status_text = f"AUDITED ({model_used})"
             if "P0" in audit_res or "CRITICAL" in audit_res.upper():
                 has_critical_p0 = True
 
@@ -382,7 +400,7 @@ def main():
     # GitHub Actions Step Summary
     condensed_summary = f"""### 🛡️ FlashCore Autonomous Codebase Audit Summary
 - **Timestamp**: `{audit_timestamp}`
-- **Model**: `{args.model}`
+- **Model**: `{effective_model}`
 - **Mode**: `{'DRY RUN' if args.dry_run else 'ACTIVE GENAI SCAN'}`
 - **Files Inspected**: `{total_files}` across `{len(selected_subsystems)}` subsystems
 - **Artifact Report**: `{args.output}`
