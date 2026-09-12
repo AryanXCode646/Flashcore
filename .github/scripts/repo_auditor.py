@@ -165,14 +165,16 @@ The source files belonging to this subsystem are provided below:
 
 Please execute your thorough security, concurrency, memory, correctness, and architectural review now.
 """
-    candidate_models = [primary_model]
-    for m in ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.0-flash"]:
+    candidate_models = []
+    if primary_model and primary_model not in candidate_models:
+        candidate_models.append(primary_model)
+    for m in ["gemini-3.6-flash", "gemini-2.5-flash"]:
         if m not in candidate_models:
             candidate_models.append(m)
 
     last_error = None
     for model_name in candidate_models:
-        for attempt in range(3):
+        for attempt in range(4):
             try:
                 response = client.models.generate_content(
                     model=model_name,
@@ -190,7 +192,9 @@ Please execute your thorough security, concurrency, memory, correctness, and arc
                 last_error = e
                 print(f"[!] Model '{model_name}' (attempt {attempt + 1}) audit failed for subsystem {subsystem_key}: {err_str}")
                 if "503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str:
-                    time.sleep(2 * (attempt + 1))
+                    sleep_time = (2 ** attempt) * 2 + 1
+                    print(f"[*] Retrying subsystem {subsystem_key} in {sleep_time}s due to service load...")
+                    time.sleep(sleep_time)
                     continue
                 else:
                     break

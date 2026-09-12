@@ -42,5 +42,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GEMINI_MODEL: "gemini-3.6-flash"
         run: |
           python3 .github/scripts/pr_reviewer.py

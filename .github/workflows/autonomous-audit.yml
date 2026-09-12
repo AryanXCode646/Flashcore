@@ -55,6 +55,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          GEMINI_MODEL: "gemini-3.6-flash"
           INPUT_SUBSYSTEMS: ${{ github.event.inputs.subsystems || 'all' }}
           INPUT_CREATE_ISSUE: ${{ github.event.inputs.create_issue }}
           INPUT_FAIL_ON_CRITICAL: ${{ github.event.inputs.fail_on_critical }}
