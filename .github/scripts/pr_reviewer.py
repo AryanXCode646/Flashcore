@@ -163,7 +163,7 @@ Below is the unified git diff of this pull request:
 Please execute your autonomous review following the specified criteria and formatting.
 """
     candidate_models = [primary_model]
-    for m in ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+    for m in ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
         if m not in candidate_models:
             candidate_models.append(m)
 
@@ -186,10 +186,30 @@ Please execute your autonomous review following the specified criteria and forma
             err_str = str(e)
             last_error = e
             print(f"[!] Model '{model_name}' invocation failed: {err_str}")
-            # Continuously attempt next candidate model on any API rejection or rate limit
             continue
 
     return f"Error executing Gemini review: {last_error}", primary_model
+
+
+def find_existing_comment(url_comments: str, headers: dict) -> int | None:
+    """Traverse all comment pages with pagination links to find an existing review tag."""
+    url = url_comments
+    params = {"per_page": 100}
+    while url:
+        try:
+            res = requests.get(url, headers=headers, params=params, timeout=15)
+            if res.status_code != 200:
+                break
+            for comment in res.json():
+                if PR_REVIEW_TAG in comment.get("body", ""):
+                    return comment["id"]
+            next_link = res.links.get("next")
+            url = next_link.get("url") if next_link else None
+            params = None
+        except Exception as e:
+            print(f"[!] Error during comment pagination: {e}")
+            break
+    return None
 
 
 def post_or_update_pr_comment(repo: str, pr_number: int, token: str, review_body: str, model_used: str) -> None:
@@ -204,15 +224,9 @@ def post_or_update_pr_comment(repo: str, pr_number: int, token: str, review_body
     # Prepend tag to review body for idempotency
     tagged_body = f"{PR_REVIEW_TAG}\n{review_body}\n\n---\n*Reviewed autonomously by `{model_used}` via `google-genai` SDK.*"
 
-    try:
-        res = requests.get(url_comments, headers=headers, params={"per_page": 100}, timeout=15)
-        existing_comment_id = None
-        if res.status_code == 200:
-            for comment in res.json():
-                if PR_REVIEW_TAG in comment.get("body", ""):
-                    existing_comment_id = comment["id"]
-                    break
+    existing_comment_id = find_existing_comment(url_comments, headers)
 
+    try:
         if existing_comment_id:
             print(f"[✓] Updating existing PR review comment #{existing_comment_id}...")
             patch_res = requests.patch(

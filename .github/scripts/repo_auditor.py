@@ -166,7 +166,7 @@ The source files belonging to this subsystem are provided below:
 Please execute your thorough security, concurrency, memory, correctness, and architectural review now.
 """
     candidate_models = [primary_model]
-    for m in ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+    for m in ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
         if m not in candidate_models:
             candidate_models.append(m)
 
@@ -193,6 +193,27 @@ Please execute your thorough security, concurrency, memory, correctness, and arc
     return f"Error executing Gemini audit for subsystem {subsystem_key}: {last_error}", primary_model
 
 
+def find_existing_audit_issue(api_base: str, headers: dict) -> int | None:
+    """Traverse all open audit issues using pagination links to find existing audit issue."""
+    url = f"{api_base}/issues"
+    params = {"state": "open", "labels": "audit", "per_page": 100}
+    while url:
+        try:
+            res = requests.get(url, headers=headers, params=params, timeout=15)
+            if res.status_code != 200:
+                break
+            for issue in res.json():
+                if "Autonomous Audit" in issue.get("title", ""):
+                    return issue["number"]
+            next_link = res.links.get("next")
+            url = next_link.get("url") if next_link else None
+            params = None
+        except Exception as e:
+            print(f"[!] Error during audit issue pagination: {e}")
+            break
+    return None
+
+
 def post_or_update_github_issue(repo: str, token: str, report_content: str) -> None:
     """Create or update GitHub Issue with audit findings using GitHub REST API."""
     if not REQUESTS_AVAILABLE or not token or not repo:
@@ -208,21 +229,9 @@ def post_or_update_github_issue(repo: str, token: str, report_content: str) -> N
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     issue_title = f"[Autonomous Audit] FlashCore Security, Concurrency & Quality Report ({today})"
 
-    # Check for existing open issue with audit label or matching title (using pagination)
-    try:
-        issues_res = requests.get(
-            f"{api_base}/issues",
-            headers=headers,
-            params={"state": "open", "labels": "audit", "per_page": 100},
-            timeout=15
-        )
-        existing_issue_number = None
-        if issues_res.status_code == 200:
-            for issue in issues_res.json():
-                if "Autonomous Audit" in issue.get("title", ""):
-                    existing_issue_number = issue["number"]
-                    break
+    existing_issue_number = find_existing_audit_issue(api_base, headers)
 
+    try:
         if existing_issue_number:
             print(f"[GitHub Issue] Updating existing audit issue #{existing_issue_number}...")
             update_res = requests.patch(
@@ -354,7 +363,7 @@ def main():
             content_summary += "\n*Dry-run complete: Set GEMINI_API_KEY to trigger autonomous LLM security & concurrency audit.*\n"
             subsystem_results[sub_key] = content_summary
         else:
-            print(f"[*] Analyzing subsystem [{sub_key}] via Gemini 2.5 Flash (with fallback)...")
+            print(f"[*] Analyzing subsystem [{sub_key}] via Gemini (with fallback)...")
             code_bundle = bundle_code_content(repo_root, files)
             audit_res, model_used = run_gemini_audit(client, args.model, sub_key, sub_info, code_bundle)
             effective_model = model_used

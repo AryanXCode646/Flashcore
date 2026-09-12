@@ -11,8 +11,9 @@ from pathlib import Path
 try:
     from google import genai
     from google.genai import types
+    GENAI_AVAILABLE = True
 except ImportError:
-    pass
+    GENAI_AVAILABLE = False
 
 
 def audit_codebase_snippet(file_path: str):
@@ -26,9 +27,7 @@ def audit_codebase_snippet(file_path: str):
         print("Error: GEMINI_API_KEY environment variable is required.")
         return
 
-    try:
-        from google import genai
-    except ImportError:
+    if not GENAI_AVAILABLE:
         print("Please install google-genai: pip install google-genai")
         return
 
@@ -46,21 +45,20 @@ def audit_codebase_snippet(file_path: str):
     Provide specific P0/P1/P2 issues found and concrete remediation steps.
     """
 
-    for model_name in ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+    candidate_models = ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    for model_name in candidate_models:
         try:
             response = client.models.generate_content(
                 model=model_name,
                 contents=prompt
             )
-            print(f"--- Audit Report for {file_path} ({model_name}) ---\n")
-            print(response.text)
-            return
+            if response and response.text:
+                print(f"--- Audit Report for {file_path} ({model_name}) ---\n")
+                print(response.text)
+                return
         except Exception as e:
-            err = str(e)
-            if "NOT_FOUND" in err or "no longer available" in err or "404" in err:
-                continue
-            print(f"Error calling {model_name}: {e}")
-            return
+            print(f"[!] Fallback from {model_name}: {e}")
+            continue
 
 
 if __name__ == "__main__":
