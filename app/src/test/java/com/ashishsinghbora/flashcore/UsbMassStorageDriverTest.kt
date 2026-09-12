@@ -172,6 +172,26 @@ class UsbMassStorageDriverTest {
     }
 
     @Test
+    fun testWriteBlocksDoesNotRetryAfterUncertainDataOutFailure() {
+        val adapter = MockUsbConnectionAdapter()
+        var cbwCount = 0
+        adapter.cbwTransferOverride = { _, _, _ ->
+            cbwCount++
+            31
+        }
+        adapter.dataOutTransferOverride = { _, _, _ -> -1 }
+
+        val driver = createDriver(adapter)
+        val writeBuffer = ByteArray(512) { 0x5A.toByte() }
+
+        assertThrows(IOException::class.java) {
+            driver.writeBlocks(lba = 20L, blockCount = 1, srcBuffer = writeBuffer)
+        }
+
+        assertEquals("Uncertain writes must not be retried", 1, cbwCount)
+    }
+
+    @Test
     fun testWriteDirectBufferFailsOnPartialDataOut() {
         val adapter = MockUsbConnectionAdapter()
         var writeAttemptCount = 0

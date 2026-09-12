@@ -264,7 +264,14 @@ object ScsiCdbBuilder {
         val lastLba = buf.int.toLong() and 0xFFFFFFFFL
         val blockSize = buf.int
 
-        val totalCapacity = (lastLba + 1L) * blockSize
+        require(blockSize > 0) { "Read Capacity 10 block size must be > 0: $blockSize" }
+        require(lastLba < Long.MAX_VALUE) { "Read Capacity 10 maximum LBA overflows 64-bit capacity math: $lastLba" }
+        val totalBlocks = lastLba + 1L
+        require(totalBlocks <= Long.MAX_VALUE / blockSize.toLong()) {
+            "Read Capacity 10 total bytes overflow: maxLba=$lastLba, blockSize=$blockSize"
+        }
+
+        val totalCapacity = totalBlocks * blockSize.toLong()
         return ReadCapacityResponse(
             maxLba = lastLba,
             blockSizeBytes = blockSize,
@@ -278,7 +285,16 @@ object ScsiCdbBuilder {
         val lastLba = buf.long
         val blockSize = buf.int
 
-        val totalCapacity = (lastLba + 1L) * blockSize
+        require(blockSize > 0) { "Read Capacity 16 block size must be > 0: $blockSize" }
+        require(lastLba >= 0L && lastLba < Long.MAX_VALUE) {
+            "Read Capacity 16 maximum LBA is outside the supported signed 64-bit range: $lastLba"
+        }
+        val totalBlocks = lastLba + 1L
+        require(totalBlocks <= Long.MAX_VALUE / blockSize.toLong()) {
+            "Read Capacity 16 total bytes overflow: maxLba=$lastLba, blockSize=$blockSize"
+        }
+
+        val totalCapacity = totalBlocks * blockSize.toLong()
         return ReadCapacityResponse(
             maxLba = lastLba,
             blockSizeBytes = blockSize,

@@ -25,6 +25,7 @@ import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.UUID
 
 /**
@@ -249,6 +250,46 @@ class FlashCoreUnitTest {
         assertEquals(8589934591L, cap16.maxLba)
         assertEquals(512, cap16.blockSizeBytes)
         assertEquals(8589934592L * 512L, cap16.totalCapacityBytes)
+    }
+
+    @Test
+    fun testScsiReadCapacityRejectsOverflowAndInvalidBlockSize() {
+        val cap10Overflow = ByteArray(8)
+        val cap10Buf = ByteBuffer.wrap(cap10Overflow).order(ByteOrder.BIG_ENDIAN)
+        cap10Buf.putInt(-1)
+        cap10Buf.putInt(4096)
+
+        val cap10 = ScsiCdbBuilder.parseReadCapacity10(cap10Overflow)
+        assertEquals(0xFFFFFFFFL, cap10.maxLba)
+        assertEquals(4096, cap10.blockSizeBytes)
+        assertEquals((0xFFFFFFFFL + 1L) * 4096L, cap10.totalCapacityBytes)
+
+        val cap16Overflow = ByteArray(32)
+        val cap16Buf = ByteBuffer.wrap(cap16Overflow).order(ByteOrder.BIG_ENDIAN)
+        cap16Buf.putLong(Long.MAX_VALUE)
+        cap16Buf.putInt(4096)
+
+        assertThrows(IllegalArgumentException::class.java) {
+            ScsiCdbBuilder.parseReadCapacity16(cap16Overflow)
+        }
+
+        val unsignedLbaOverflow = ByteArray(32)
+        val unsignedBuf = ByteBuffer.wrap(unsignedLbaOverflow).order(ByteOrder.BIG_ENDIAN)
+        unsignedBuf.putLong(-1L)
+        unsignedBuf.putInt(512)
+
+        assertThrows(IllegalArgumentException::class.java) {
+            ScsiCdbBuilder.parseReadCapacity16(unsignedLbaOverflow)
+        }
+
+        val invalidBlockSize = ByteArray(8)
+        val invalidBuf = ByteBuffer.wrap(invalidBlockSize).order(ByteOrder.BIG_ENDIAN)
+        invalidBuf.putInt(1024)
+        invalidBuf.putInt(0)
+
+        assertThrows(IllegalArgumentException::class.java) {
+            ScsiCdbBuilder.parseReadCapacity10(invalidBlockSize)
+        }
     }
 
     @Test
