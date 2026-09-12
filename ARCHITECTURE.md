@@ -188,6 +188,14 @@ All layers currently reside within the `app` module under `com.example.*`.
     - **Sparse & Unwritten Region Semantics:** Unallocated or trailing sparse regions read back as deterministic zeroes.
     - **Safety & Verification:** Overflow-safe 64-bit LBA bounds checks, buffer offset/length validation, direct `ByteBuffer` integrity verification, and media cache persistence via `FileChannel.force(true)` on `flush()`.
     - **Lifecycle:** Idempotent `close()` and consistent `DeviceDisconnectedException` enforcement upon disconnection.
+  - **Fault-Injecting Block Device (`FaultInjectingBlockDevice`):**
+    - Decorator wrapping any underlying `BlockDevice` to deterministically simulate physical hardware and bus failures without physical USB OTG media.
+    - **Read & Write Faults:** Injects hard I/O exceptions at exact LBAs, across LBA ranges, or on next operations with configurable one-shot or persistent semantics, executing before touching the delegate.
+    - **Short Transfers (Partial I/O):** Supports partial sector transfers for both standard array and direct `ByteBuffer` paths (`read`, `write`, `writeDirectBuffer`), faithfully modeling hardware rejection without ambiguous success states.
+    - **Device Disconnect Simulation:** Triggers persistent `DeviceDisconnectedException` at exact LBAs or after configurable byte/block transfer thresholds, transitioning `isConnected` to false and rejecting all subsequent operations.
+    - **Timeouts:** Coroutine-safe cancellable delays with configurable `InterruptedIOException` injection on read, write, or specific LBAs.
+    - **Flush / Cache Sync Failures:** Simulates volatile-to-NAND cache sync failures (either throwing `IOException` or returning false), ensuring flashing pipelines never falsely report completion after a flush fault.
+    - **Sector Corruption:** Emulates bit-rot and transmission corruption on read and write paths for verification engine testing without corrupting caller buffers.
 
 ### Layer 7: Hardware Transport & SCSI Driver
 * **Components:** `UsbMassStorageDriver`, `CommandBlockWrapper` (CBW), `CommandStatusWrapper` (CSW), `ScsiCdbBuilder`.

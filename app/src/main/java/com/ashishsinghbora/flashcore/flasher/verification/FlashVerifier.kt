@@ -93,12 +93,26 @@ object FlashVerifier {
                 }
 
                 // 2. Read sectors back from USB target device
-                val readSuccess = device.read(
-                    lba = currentLba,
-                    blockCount = sectorsToRead,
-                    dest = deviceBuffer,
-                    offset = 0
-                )
+                val readSuccess = try {
+                    device.read(
+                        lba = currentLba,
+                        blockCount = sectorsToRead,
+                        dest = deviceBuffer,
+                        offset = 0
+                    )
+                } catch (e: Exception) {
+                    return VerificationResult(
+                        success = false,
+                        verifiedBytes = verifiedBytes,
+                        durationMs = System.currentTimeMillis() - startTime,
+                        averageSpeedMBps = 0.0,
+                        sourceSha256 = "",
+                        targetSha256 = "",
+                        mismatchLba = currentLba,
+                        mismatchOffset = verifiedBytes,
+                        errorMessage = "SCSI READ failed at LBA $currentLba during verification: ${e.message}"
+                    )
+                }
 
                 if (!readSuccess) {
                     return VerificationResult(

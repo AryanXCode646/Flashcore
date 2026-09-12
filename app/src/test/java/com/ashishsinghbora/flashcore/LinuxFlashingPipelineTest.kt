@@ -11,6 +11,9 @@ import com.ashishsinghbora.flashcore.flasher.checksum.ChecksumValidator
 import com.ashishsinghbora.flashcore.flasher.safety.FlashSafetyValidator
 import com.ashishsinghbora.flashcore.flasher.strategies.LinuxRawDdStrategy
 import com.ashishsinghbora.flashcore.flasher.verification.FlashVerifier
+import com.ashishsinghbora.flashcore.flasher.fsm.FlasherEvent
+import com.ashishsinghbora.flashcore.flasher.fsm.FlasherState
+import com.ashishsinghbora.flashcore.flasher.fsm.FlasherStateMachine
 import com.ashishsinghbora.flashcore.usb.UsbDiskInfo
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
@@ -406,5 +409,232 @@ class LinuxFlashingPipelineTest {
 
         assertFalse("Cancelled execution must report success = false", result.success)
         assertTrue("Error message should mention cancellation", result.errorMessage!!.contains("cancelled"))
+    }
+
+    // ------------------------------------------------------------------------
+    // Issue #5: Pipeline Safety & Fault-Injection Integration Tests
+    // ------------------------------------------------------------------------
+
+    @Test
+    fun testFlashingPipelineAbortsOnWriteFailure() = runTest {
+        val strategy = LinuxRawDdStrategy()
+        val mem = MemoryBlockDevice(totalSectors = 20480L, sectorSizeBytes = 512)
+        val faultDevice = FaultInjectingBlockDevice(mem)
+        val fsm = FlasherStateMachine()
+
+        // Inject write failure at LBA 0
+        faultDevice.failWriteAt(0L, java.io.IOException("Injected SCSI write fault at LBA 0"))
+
+        val analysis = IsoTrieParser.parse(
+            stream = testIsoFile.inputStream(),
+            totalSizeBytes = testIsoBytes.size.toLong(),
+            fileName = "ubuntu.iso"
+        )
+
+        val result = strategy.execute(
+            context = app,
+            device = faultDevice,
+            targetDrive = defaultTargetDrive,
+            sourceUri = Uri.fromFile(testIsoFile),
+            isoAnalysis = analysis,
+            config = FlashEngineStrategy.FlashConfig(confirmedByUser = true),
+            callback = object : FlashEngineStrategy.ProgressCallback {
+                override fun onPartitionProgress(stage: String, progress: Float) {}
+                override fun onStreamProgress(writtenBytes: Long, totalBytes: Long, speedMBps: Double, etaSeconds: Long, bufferSaturation: Float, currentLba: Long, chunkIndex: Int, totalChunks: Int) {}
+                override fun onVerificationProgress(verifiedBytes: Long, totalBytes: Long, isMatching: Boolean) {}
+                override fun onLogMessage(message: String) {}
+            },
+            isCancelled = { false }
+        )
+
+        assertFalse("Flashing must fail when a write fault is injected", result.success)
+        assertNotNull(result.errorMessage)
+        assertTrue("Error message should mention failure", result.errorMessage!!.contains("fault at LBA 0") || result.errorMessage!!.contains("write failed"))
+
+        // Update FSM as ViewModel would
+        fsm.transition(
+            FlasherEvent.FlashErrorOccurred(
+                device = defaultTargetDrive,
+                errorMessage = result.errorMessage!!,
+                canRetry = true,
+                failedLba = 0L
+            )
+        )
+        assertTrue("FSM must transition to ErrorRecovery on write failure", fsm.state.value is FlasherState.ErrorRecovery)
+        assertFalse("FSM must NOT transition to Completed on failure", fsm.state.value is FlasherState.Completed)
+    }
+
+    @Test
+    fun testFlashingPipelineAbortsOnShortWrite() = runTest {
+        val strategy = LinuxRawDdStrategy()
+        val mem = MemoryBlockDevice(totalSectors = 20480L, sectorSizeBytes = 512)
+        val faultDevice = FaultInjectingBlockDevice(mem)
+        val fsm = FlasherStateMachine()
+
+        // Short write: reject full transfer at LBA 0 (only accept 1 sector)
+        faultDevice.shortWriteAt(0L, maxBlocks = 1, throws = false)
+
+        val analysis = IsoTrieParser.parse(
+            stream = testIsoFile.inputStream(),
+            totalSizeBytes = testIsoBytes.size.toLong(),
+            fileName = "ubuntu.iso"
+        )
+
+        val result = strategy.execute(
+            context = app,
+            device = faultDevice,
+            targetDrive = defaultTargetDrive,
+            sourceUri = Uri.fromFile(testIsoFile),
+            isoAnalysis = analysis,
+            config = FlashEngineStrategy.FlashConfig(confirmedByUser = true),
+            callback = object : FlashEngineStrategy.ProgressCallback {
+                override fun onPartitionProgress(stage: String, progress: Float) {}
+                override fun onStreamProgress(writtenBytes: Long, totalBytes: Long, speedMBps: Double, etaSeconds: Long, bufferSaturation: Float, currentLba: Long, chunkIndex: Int, totalChunks: Int) {}
+                override fun onVerificationProgress(verifiedBytes: Long, totalBytes: Long, isMatching: Boolean) {}
+                override fun onLogMessage(message: String) {}
+            },
+            isCancelled = { false }
+        )
+
+        assertFalse("Short write must never produce successful flash result", result.success)
+        fsm.transition(
+            FlasherEvent.FlashErrorOccurred(
+                device = defaultTargetDrive,
+                errorMessage = result.errorMessage ?: "Short write",
+                canRetry = true,
+                failedLba = 0L
+            )
+        )
+        assertTrue(fsm.state.value is FlasherState.ErrorRecovery)
+    }
+
+    @Test
+    fun testFlashingPipelineAbortsOnDisconnectDuringWrite() = runTest {
+        val strategy = LinuxRawDdStrategy()
+        val mem = MemoryBlockDevice(totalSectors = 20480L, sectorSizeBytes = 512)
+        val faultDevice = FaultInjectingBlockDevice(mem)
+        val fsm = FlasherStateMachine()
+
+        // Disconnect immediately at LBA 0
+        faultDevice.disconnectAt(0L)
+
+        val analysis = IsoTrieParser.parse(
+            stream = testIsoFile.inputStream(),
+            totalSizeBytes = testIsoBytes.size.toLong(),
+            fileName = "ubuntu.iso"
+        )
+
+        val result = strategy.execute(
+            context = app,
+            device = faultDevice,
+            targetDrive = defaultTargetDrive,
+            sourceUri = Uri.fromFile(testIsoFile),
+            isoAnalysis = analysis,
+            config = FlashEngineStrategy.FlashConfig(confirmedByUser = true),
+            callback = object : FlashEngineStrategy.ProgressCallback {
+                override fun onPartitionProgress(stage: String, progress: Float) {}
+                override fun onStreamProgress(writtenBytes: Long, totalBytes: Long, speedMBps: Double, etaSeconds: Long, bufferSaturation: Float, currentLba: Long, chunkIndex: Int, totalChunks: Int) {}
+                override fun onVerificationProgress(verifiedBytes: Long, totalBytes: Long, isMatching: Boolean) {}
+                override fun onLogMessage(message: String) {}
+            },
+            isCancelled = { false }
+        )
+
+        assertFalse("Flashing must fail when device disconnects", result.success)
+        assertFalse("Device must remain disconnected", faultDevice.isConnected)
+
+        fsm.transition(
+            FlasherEvent.FlashErrorOccurred(
+                device = defaultTargetDrive,
+                errorMessage = result.errorMessage ?: "Disconnected",
+                canRetry = false,
+                failedLba = 0L
+            )
+        )
+        assertTrue(fsm.state.value is FlasherState.ErrorRecovery)
+    }
+
+    @Test
+    fun testFlashingPipelineAbortsOnFlushFailure() = runTest {
+        val strategy = LinuxRawDdStrategy()
+        val mem = MemoryBlockDevice(totalSectors = 20480L, sectorSizeBytes = 512)
+        val faultDevice = FaultInjectingBlockDevice(mem)
+        val fsm = FlasherStateMachine()
+
+        // Inject flush failure returning false
+        faultDevice.failOnFlush = true
+        faultDevice.flushThrows = false
+
+        val analysis = IsoTrieParser.parse(
+            stream = testIsoFile.inputStream(),
+            totalSizeBytes = testIsoBytes.size.toLong(),
+            fileName = "ubuntu.iso"
+        )
+
+        val result = strategy.execute(
+            context = app,
+            device = faultDevice,
+            targetDrive = defaultTargetDrive,
+            sourceUri = Uri.fromFile(testIsoFile),
+            isoAnalysis = analysis,
+            // Disable verification to specifically verify that flush failure alone aborts before completion
+            config = FlashEngineStrategy.FlashConfig(verifyAfterWrite = false, confirmedByUser = true),
+            callback = object : FlashEngineStrategy.ProgressCallback {
+                override fun onPartitionProgress(stage: String, progress: Float) {}
+                override fun onStreamProgress(writtenBytes: Long, totalBytes: Long, speedMBps: Double, etaSeconds: Long, bufferSaturation: Float, currentLba: Long, chunkIndex: Int, totalChunks: Int) {}
+                override fun onVerificationProgress(verifiedBytes: Long, totalBytes: Long, isMatching: Boolean) {}
+                override fun onLogMessage(message: String) {}
+            },
+            isCancelled = { false }
+        )
+
+        assertFalse("Flush failure must prevent successful completion", result.success)
+        assertTrue(result.errorMessage!!.contains("cache synchronize failed"))
+
+        fsm.transition(
+            FlasherEvent.FlashErrorOccurred(
+                device = defaultTargetDrive,
+                errorMessage = result.errorMessage!!,
+                canRetry = true,
+                failedLba = 0L
+            )
+        )
+        assertTrue(fsm.state.value is FlasherState.ErrorRecovery)
+        assertFalse(fsm.state.value is FlasherState.Completed)
+    }
+
+    @Test
+    fun testFlashingPipelineAbortsOnVerificationReadFailure() = runTest {
+        val strategy = LinuxRawDdStrategy()
+        val mem = MemoryBlockDevice(totalSectors = 20480L, sectorSizeBytes = 512)
+        val faultDevice = FaultInjectingBlockDevice(mem)
+
+        // Inject read failure at LBA 0 (write succeeds, verification read fails)
+        faultDevice.failReadAt(0L, java.io.IOException("Unreadable NAND block at Sector 0"))
+
+        val analysis = IsoTrieParser.parse(
+            stream = testIsoFile.inputStream(),
+            totalSizeBytes = testIsoBytes.size.toLong(),
+            fileName = "ubuntu.iso"
+        )
+
+        val result = strategy.execute(
+            context = app,
+            device = faultDevice,
+            targetDrive = defaultTargetDrive,
+            sourceUri = Uri.fromFile(testIsoFile),
+            isoAnalysis = analysis,
+            config = FlashEngineStrategy.FlashConfig(verifyAfterWrite = true, confirmedByUser = true),
+            callback = object : FlashEngineStrategy.ProgressCallback {
+                override fun onPartitionProgress(stage: String, progress: Float) {}
+                override fun onStreamProgress(writtenBytes: Long, totalBytes: Long, speedMBps: Double, etaSeconds: Long, bufferSaturation: Float, currentLba: Long, chunkIndex: Int, totalChunks: Int) {}
+                override fun onVerificationProgress(verifiedBytes: Long, totalBytes: Long, isMatching: Boolean) {}
+                override fun onLogMessage(message: String) {}
+            },
+            isCancelled = { false }
+        )
+
+        assertFalse("Verification read failure must cause flash to fail", result.success)
+        assertTrue(result.errorMessage!!.contains("verification") || result.errorMessage!!.contains("Unreadable NAND block"))
     }
 }

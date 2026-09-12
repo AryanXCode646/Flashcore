@@ -353,7 +353,12 @@ class WindowsUefiStrategy : FlashEngineStrategy {
             // -----------------------------------------------------------------
             callback.onPartitionProgress("Flushing FAT32 structures and drive cache...", 0.94f)
             fat32Writer.flush()
-            device.flush()
+            val flushSuccess = device.flush()
+            if (!flushSuccess) {
+                val err = "Physical drive cache flush failed"
+                callback.onLogMessage("ERROR: $err")
+                return@withContext failureResult(err, startTime, totalWritten)
+            }
             callback.onLogMessage("Filesystem and physical drive cache synchronized.")
 
             // -----------------------------------------------------------------

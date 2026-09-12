@@ -227,7 +227,10 @@ class VentoyInstaller(
         // STEP 5: FLUSH & VERIFICATION
         // ---------------------------------------------------------------------
         callback.onPartitionProgress("Flushing USB cache to physical media...", 0.92f)
-        device.flush()
+        val flushSuccess = device.flush()
+        if (!flushSuccess) {
+            return@withContext failure("Post-install flush failed: USB cache synchronize rejected", layout, startTime, totalBytesWritten)
+        }
 
         callback.onPartitionProgress("Verifying Ventoy multi-boot integrity...", 0.96f)
         val verifyInfo = VentoyDetector.detect(device)
