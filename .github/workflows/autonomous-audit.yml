@@ -55,19 +55,20 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          INPUT_SUBSYSTEMS: ${{ github.event.inputs.subsystems || 'all' }}
+          INPUT_CREATE_ISSUE: ${{ github.event.inputs.create_issue }}
+          INPUT_FAIL_ON_CRITICAL: ${{ github.event.inputs.fail_on_critical }}
         run: |
           FLAGS=""
-          if [ "${{ github.event.inputs.create_issue }}" != "false" ]; then
+          if [ "$INPUT_CREATE_ISSUE" != "false" ]; then
             FLAGS="$FLAGS --create-issue"
           fi
-          if [ "${{ github.event.inputs.fail_on_critical }}" = "true" ]; then
+          if [ "$INPUT_FAIL_ON_CRITICAL" = "true" ]; then
             FLAGS="$FLAGS --fail-on-critical"
           fi
 
-          SUBSYSTEM="${{ github.event.inputs.subsystems || 'all' }}"
-
           python3 .github/scripts/repo_auditor.py \
-            --subsystems "$SUBSYSTEM" \
+            --subsystems "$INPUT_SUBSYSTEMS" \
             --output audit_report.md \
             $FLAGS
 

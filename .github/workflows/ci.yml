@@ -51,7 +51,8 @@ jobs:
 
       - name: Validate Automation & Claims Scripts
         run: |
-          python3 -m py_compile scripts/*.py .github/scripts/*.py
+          python3 -c "import py_compile, glob; [py_compile.compile(f, doraise=True) for f in glob.glob('scripts/*.py') + glob.glob('.github/scripts/*.py')]"
+          python3 scripts/test_automation_scripts.py -v
           python3 scripts/audit_claims.py
           python3 scripts/test_audit_claims.py -v
 
