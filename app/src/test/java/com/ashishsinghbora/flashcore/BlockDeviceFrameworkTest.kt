@@ -1337,4 +1337,596 @@ class BlockDeviceFrameworkTest {
             assertEquals(17 * 512L, fake.totalBytesWritten)
         }
     }
+
+    // ------------------------------------------------------------------------
+    // Issue #5: Comprehensive FaultInjectingBlockDevice Test Matrix
+    // ------------------------------------------------------------------------
+
+    // --- 1-5: Basic decorator behavior ---
+    @Test
+    fun testFaultDeviceBasicDecoratorPassThrough() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+
+            // 1. Metadata mirrors delegate
+            assertEquals(512, faultDevice.sectorSizeBytes)
+            val cap = faultDevice.capacity()
+            assertEquals(1000L, cap.totalSectors)
+            assertEquals(512, cap.sectorSizeBytes)
+            assertEquals(512000L, cap.totalBytes)
+
+            // 2. Connection state mirrors delegate
+            assertTrue(faultDevice.isConnected)
+
+            // 3. Write delegates normally
+            val payload = ByteArray(1024) { (it % 100).toByte() }
+            val writeOk = faultDevice.write(10L, 2, payload)
+            assertTrue(writeOk)
+            assertEquals(2L, mem.writeCount)
+            assertEquals(1024L, faultDevice.totalBytesWritten.get())
+
+            // 4. Read delegates normally
+            val readBuf = ByteArray(1024)
+            val readOk = faultDevice.read(10L, 2, readBuf)
+            assertTrue(readOk)
+            assertArrayEquals(payload, readBuf)
+            assertEquals(2L, mem.readCount)
+            assertEquals(1024L, faultDevice.totalBytesRead.get())
+
+            // 5. Flush delegates normally
+            val flushOk = faultDevice.flush()
+            assertTrue(flushOk)
+            assertEquals(1L, mem.flushCount)
+        }
+    }
+
+    // --- 6-12: Read faults ---
+    @Test
+    fun testFailNextReadOneShot() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+            val dest = ByteArray(512)
+
+            faultDevice.failNextRead(IOException("Injected transient read failure"))
+
+            // First read fails
+            val ex = assertThrows(IOException::class.java) {
+                runBlocking { faultDevice.read(0L, 1, dest) }
+            }
+            assertTrue(ex.message!!.contains("Injected transient read failure"))
+
+            // Subsequent read immediately succeeds (one-shot)
+            assertTrue(faultDevice.read(0L, 1, dest))
+        }
+    }
+
+    @Test
+    fun testFailReadAtExactLba() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+            val dest = ByteArray(512)
+
+            faultDevice.failReadAt(50L, IOException("Unreadable sector 50"))
+
+            // Reading LBA 49 succeeds
+            assertTrue(faultDevice.read(49L, 1, dest))
+
+            // Reading LBA 50 fails before touching delegate
+            val prevReadCount = mem.readCount
+            val ex = assertThrows(IOException::class.java) {
+                runBlocking { faultDevice.read(50L, 1, dest) }
+            }
+            assertTrue(ex.message!!.contains("sector 50"))
+            assertEquals(prevReadCount, mem.readCount)
+
+            // Reading LBA 51 succeeds
+            assertTrue(faultDevice.read(51L, 1, dest))
+
+            // Write at LBA 50 still succeeds because read fault was operation-specific
+            assertTrue(faultDevice.write(50L, 1, dest))
+        }
+    }
+
+    @Test
+    fun testFailReadInsideMultiSectorRange() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+
+            faultDevice.failReadAt(55L)
+
+            // Multi-sector read [50..59] covers LBA 55 -> must fail
+            assertThrows(IOException::class.java) {
+                runBlocking { faultDevice.read(50L, 10, ByteArray(10 * 512)) }
+            }
+
+            // Multi-sector read [40..49] does NOT cover LBA 55 -> succeeds
+            assertTrue(faultDevice.read(40L, 10, ByteArray(10 * 512)))
+        }
+    }
+
+    @Test
+    fun testFailReadOverLbaRange() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+
+            faultDevice.failReadRange(100L..120L)
+
+            // Read touching range
+            assertThrows(IOException::class.java) {
+                runBlocking { faultDevice.read(105L, 2, ByteArray(2 * 512)) }
+            }
+
+            // Read outside range
+            assertTrue(faultDevice.read(90L, 5, ByteArray(5 * 512)))
+            assertTrue(faultDevice.read(130L, 5, ByteArray(5 * 512)))
+        }
+    }
+
+    @Test
+    fun testShortReadAtExactLba() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            // Write known distinct patterns to sectors 100..103
+            for (i in 0 until 4) {
+                mem.write(100L + i, 1, ByteArray(512) { (i + 1).toByte() })
+            }
+
+            val faultDevice = FaultInjectingBlockDevice(mem)
+            // At LBA 100, only 2 sectors can be read
+            faultDevice.shortReadAt(100L, maxBlocks = 2, throws = false)
+
+            val dest = ByteArray(4 * 512) { 0xEE.toByte() }
+            val readOk = faultDevice.read(100L, 4, dest)
+
+            // Contract: short read returns false to signal partial transfer
+            assertFalse("Short read must return false to signal incomplete transfer", readOk)
+
+            // Verify first 2 sectors were read from delegate
+            val expectedSector0 = ByteArray(512) { 1.toByte() }
+            val expectedSector1 = ByteArray(512) { 2.toByte() }
+            assertArrayEquals(expectedSector0, dest.copyOfRange(0, 512))
+            assertArrayEquals(expectedSector1, dest.copyOfRange(512, 1024))
+
+            // Remaining 2 sectors remained unread / untouched canary bytes
+            val remainingCanary = ByteArray(2 * 512) { 0xEE.toByte() }
+            assertArrayEquals(remainingCanary, dest.copyOfRange(1024, 2048))
+            assertEquals(2 * 512L, faultDevice.totalBytesRead.get())
+        }
+    }
+
+    @Test
+    fun testShortReadInsideMultiSectorRequest() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            for (i in 0 until 10) {
+                mem.write(100L + i, 1, ByteArray(512) { (i + 10).toByte() })
+            }
+
+            val faultDevice = FaultInjectingBlockDevice(mem)
+            // Request covers 100..109, short read triggers at 105 allowing 2 blocks (sectors 105, 106)
+            // Allowed blocks = (105 - 100) + 2 = 7 blocks (sectors 100..106)
+            faultDevice.shortReadAt(105L, maxBlocks = 2, throws = false)
+
+            val dest = ByteArray(10 * 512) { 0xAA.toByte() }
+            val readOk = faultDevice.read(100L, 10, dest)
+            assertFalse(readOk)
+
+            // Sectors 0..6 (100..106) populated
+            for (i in 0 until 7) {
+                val expected = ByteArray(512) { (i + 10).toByte() }
+                assertArrayEquals(expected, dest.copyOfRange(i * 512, (i + 1) * 512))
+            }
+
+            // Sectors 7..9 (107..109) untouched canary
+            for (i in 7 until 10) {
+                val expected = ByteArray(512) { 0xAA.toByte() }
+                assertArrayEquals(expected, dest.copyOfRange(i * 512, (i + 1) * 512))
+            }
+        }
+    }
+
+    @Test
+    fun testShortReadThrowsExceptionWhenConfigured() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+            faultDevice.shortReadAt(100L, maxBlocks = 1, throws = true)
+
+            val ex = assertThrows(IOException::class.java) {
+                runBlocking { faultDevice.read(100L, 4, ByteArray(4 * 512)) }
+            }
+            assertTrue(ex.message!!.contains("Injected short read"))
+        }
+    }
+
+    // --- 13-18: Write faults ---
+    @Test
+    fun testFailNextWriteOneShot() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+            val payload = ByteArray(512) { 0x12 }
+
+            faultDevice.failNextWrite(IOException("Injected next write failure"))
+
+            val ex = assertThrows(IOException::class.java) {
+                runBlocking { faultDevice.write(0L, 1, payload) }
+            }
+            assertTrue(ex.message!!.contains("Injected next write failure"))
+
+            // Next write immediately succeeds
+            assertTrue(faultDevice.write(0L, 1, payload))
+            assertArrayEquals(payload, mem.getSector(0L))
+        }
+    }
+
+    @Test
+    fun testFailWriteAtExactLba() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+            val payload = ByteArray(512) { 0x34 }
+
+            faultDevice.failWriteAt(200L, IOException("Write fault at 200"))
+
+            assertTrue(faultDevice.write(199L, 1, payload))
+
+            val prevWriteCount = mem.writeCount
+            val ex = assertThrows(IOException::class.java) {
+                runBlocking { faultDevice.write(200L, 1, payload) }
+            }
+            assertTrue(ex.message!!.contains("200"))
+            assertEquals(prevWriteCount, mem.writeCount) // No partial data committed
+
+            assertTrue(faultDevice.write(201L, 1, payload))
+
+            // Read at 200 succeeds because fault is write-specific
+            assertTrue(faultDevice.read(200L, 1, ByteArray(512)))
+        }
+    }
+
+    @Test
+    fun testFailWriteOverLbaRange() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+
+            faultDevice.failWriteRange(300L..350L)
+
+            assertThrows(IOException::class.java) {
+                runBlocking { faultDevice.write(310L, 5, ByteArray(5 * 512)) }
+            }
+
+            assertTrue(faultDevice.write(290L, 5, ByteArray(5 * 512)))
+            assertTrue(faultDevice.write(360L, 5, ByteArray(5 * 512)))
+        }
+    }
+
+    @Test
+    fun testShortWriteInsideMultiSectorRequest() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+
+            // Request: 10 sectors at LBA 100 (100..109)
+            // Fault at LBA 105 with maxBlocks = 2 -> allowedBlocks = (105 - 100) + 2 = 7 blocks (100..106)
+            faultDevice.shortWriteAt(105L, maxBlocks = 2, throws = false)
+
+            val payload = ByteArray(10 * 512) { (it % 128).toByte() }
+            val writeOk = faultDevice.write(100L, 10, payload)
+            assertFalse(writeOk)
+
+            // Sectors 100..106 committed
+            for (i in 0 until 7) {
+                val expected = payload.copyOfRange(i * 512, (i + 1) * 512)
+                assertArrayEquals(expected, mem.getSector(100L + i))
+            }
+
+            // Sectors 107..109 unwritten (null in sparse memory device)
+            for (i in 7 until 10) {
+                assertEquals(null, mem.getSector(100L + i))
+            }
+        }
+    }
+
+    @Test
+    fun testDirectBufferShortWrite() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+
+            faultDevice.shortWriteAt(50L, maxBlocks = 3, throws = false)
+
+            val direct = ByteBuffer.allocateDirect(8 * 512)
+            val pattern = ByteArray(8 * 512) { (it % 250).toByte() }
+            direct.put(pattern)
+            direct.flip()
+
+            val posBefore = direct.position()
+            val limitBefore = direct.limit()
+
+            val writeOk = faultDevice.writeDirectBuffer(
+                lba = 50L,
+                blockCount = 8,
+                directBuffer = direct,
+                offset = 0,
+                length = 8 * 512
+            )
+            assertFalse(writeOk)
+
+            // Buffer position and limit must be preserved
+            assertEquals(posBefore, direct.position())
+            assertEquals(limitBefore, direct.limit())
+
+            // 3 sectors committed (50..52)
+            for (i in 0 until 3) {
+                val expected = pattern.copyOfRange(i * 512, (i + 1) * 512)
+                assertArrayEquals(expected, mem.getSector(50L + i))
+            }
+            // Sectors 53..57 unwritten
+            for (i in 3 until 8) {
+                assertEquals(null, mem.getSector(50L + i))
+            }
+        }
+    }
+
+    // --- 19-22: Timeout faults ---
+    @Test
+    fun testTimeoutOnRead() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+
+            faultDevice.timeoutOnRead = true
+            faultDevice.timeoutDelayMs = 20L
+            faultDevice.throwTimeoutException = true
+
+            // Read triggers timeout
+            val ex = assertThrows(InterruptedIOException::class.java) {
+                runBlocking { faultDevice.read(0L, 1, ByteArray(512)) }
+            }
+            assertTrue(ex.message!!.contains("timed out"))
+
+            // Write does not time out
+            assertTrue(faultDevice.write(0L, 1, ByteArray(512)))
+        }
+    }
+
+    @Test
+    fun testTimeoutOnWrite() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+
+            faultDevice.timeoutOnWrite = true
+            faultDevice.timeoutDelayMs = 20L
+            faultDevice.throwTimeoutException = true
+
+            // Write triggers timeout
+            val ex = assertThrows(InterruptedIOException::class.java) {
+                runBlocking { faultDevice.write(0L, 1, ByteArray(512)) }
+            }
+            assertTrue(ex.message!!.contains("timed out"))
+
+            // Read does not time out
+            assertTrue(faultDevice.read(0L, 1, ByteArray(512)))
+        }
+    }
+
+    @Test
+    fun testTimeoutRespectsCoroutineCancellation() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+
+            // Inject long 10-second delay
+            faultDevice.timeoutAt(lba = 10L, delayMs = 10000L, throws = true)
+
+            val job = launch(Dispatchers.Default) {
+                faultDevice.write(10L, 1, ByteArray(512))
+            }
+
+            // Allow coroutine to start and enter delay
+            Thread.sleep(50)
+            assertTrue(job.isActive)
+
+            // Cancel job and verify it cancels immediately without blocking or deadlocking
+            job.cancel()
+            job.join()
+            assertTrue(job.isCancelled)
+        }
+    }
+
+    // --- 23-27: Disconnect faults ---
+    @Test
+    fun testDisconnectAtExactLba() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+
+            faultDevice.disconnectAt(50L)
+
+            assertTrue(faultDevice.isConnected)
+            assertTrue(faultDevice.write(0L, 1, ByteArray(512)))
+
+            // Touching LBA 50 triggers disconnect
+            assertThrows(DeviceDisconnectedException::class.java) {
+                runBlocking { faultDevice.read(50L, 1, ByteArray(512)) }
+            }
+
+            // Connection state is now false and does not silently reconnect
+            assertFalse(faultDevice.isConnected)
+
+            // Subsequent operations all throw DeviceDisconnectedException
+            assertThrows(DeviceDisconnectedException::class.java) {
+                runBlocking { faultDevice.write(0L, 1, ByteArray(512)) }
+            }
+            assertThrows(DeviceDisconnectedException::class.java) {
+                runBlocking { faultDevice.capacity() }
+            }
+            assertThrows(DeviceDisconnectedException::class.java) {
+                runBlocking { faultDevice.flush() }
+            }
+        }
+    }
+
+    @Test
+    fun testDisconnectAfterBlockThreshold() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+
+            // Disconnect after 4 blocks (2048 bytes) transferred
+            faultDevice.disconnectAfterBlocks(4L)
+
+            // Transfer 2 blocks: OK
+            assertTrue(faultDevice.write(0L, 2, ByteArray(2 * 512)))
+            assertTrue(faultDevice.isConnected)
+
+            // Transfer next 2 blocks: hits threshold (4 blocks) -> triggers disconnect
+            assertThrows(DeviceDisconnectedException::class.java) {
+                runBlocking { faultDevice.write(2L, 2, ByteArray(2 * 512)) }
+            }
+
+            assertFalse(faultDevice.isConnected)
+            assertThrows(DeviceDisconnectedException::class.java) {
+                runBlocking { faultDevice.read(0L, 1, ByteArray(512)) }
+            }
+        }
+    }
+
+    @Test
+    fun testExplicitDisconnectAndIdempotentClose() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+
+            assertTrue(faultDevice.isConnected)
+            faultDevice.disconnect()
+            assertFalse(faultDevice.isConnected)
+
+            // Idempotent close
+            faultDevice.close()
+            faultDevice.close()
+            assertFalse(faultDevice.isConnected)
+            assertFalse(mem.isConnected)
+        }
+    }
+
+    // --- 28-30: Flush faults ---
+    @Test
+    fun testFlushFailureInjectedThrows() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+
+            faultDevice.failOnFlush = true
+            faultDevice.flushThrows = true
+            faultDevice.flushException = IOException("Flash cache flush failed")
+
+            val ex = assertThrows(IOException::class.java) {
+                runBlocking { faultDevice.flush() }
+            }
+            assertTrue(ex.message!!.contains("cache flush failed"))
+            assertEquals(0L, mem.flushCount) // Delegate flush was NOT called
+        }
+    }
+
+    @Test
+    fun testFlushFailureReturnsFalseWhenConfigured() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+
+            faultDevice.failOnFlush = true
+            faultDevice.flushThrows = false // configured to return false instead of throwing
+
+            val flushOk = faultDevice.flush()
+            assertFalse(flushOk)
+            assertEquals(0L, mem.flushCount)
+        }
+    }
+
+    @Test
+    fun testDelegateFlushFailurePropagated() {
+        runBlocking {
+            val fake = FakeBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            fake.flushResult = false
+
+            val faultDevice = FaultInjectingBlockDevice(fake)
+            assertFalse("Delegate flush failure must be propagated", faultDevice.flush())
+        }
+    }
+
+    // --- 31-34: Fault cleanup and determinism ---
+    @Test
+    fun testOneShotLbaFaultTriggersExactlyOnce() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+
+            faultDevice.failWriteAt(100L, oneShot = true)
+
+            // First write to LBA 100 fails
+            assertThrows(IOException::class.java) {
+                runBlocking { faultDevice.write(100L, 1, ByteArray(512)) }
+            }
+
+            // Second write to LBA 100 succeeds because one-shot was consumed
+            assertTrue(faultDevice.write(100L, 1, ByteArray(512)))
+        }
+    }
+
+    @Test
+    fun testPersistentLbaFaultContinuesToTrigger() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+
+            faultDevice.failWriteAt(100L, oneShot = false)
+
+            // Repeated attempts all fail
+            assertThrows(IOException::class.java) {
+                runBlocking { faultDevice.write(100L, 1, ByteArray(512)) }
+            }
+            assertThrows(IOException::class.java) {
+                runBlocking { faultDevice.write(100L, 1, ByteArray(512)) }
+            }
+            assertThrows(IOException::class.java) {
+                runBlocking { faultDevice.write(100L, 1, ByteArray(512)) }
+            }
+        }
+    }
+
+    @Test
+    fun testResetFaultsClearsAllInjectedFaults() {
+        runBlocking {
+            val mem = MemoryBlockDevice(totalSectors = 1000L, sectorSizeBytes = 512)
+            val faultDevice = FaultInjectingBlockDevice(mem)
+
+            faultDevice.failAtLba = 50L
+            faultDevice.failReadAtLba = 60L
+            faultDevice.failWriteAtLba = 70L
+            faultDevice.failOnFlush = true
+            faultDevice.disconnectAfterBytes = 512L
+            faultDevice.shortReadAtLba = 80L
+            faultDevice.shortWriteAtLba = 90L
+
+            faultDevice.resetFaults()
+
+            assertTrue(faultDevice.isConnected)
+            assertTrue(faultDevice.write(50L, 1, ByteArray(512)))
+            assertTrue(faultDevice.read(50L, 1, ByteArray(512)))
+            assertTrue(faultDevice.write(70L, 1, ByteArray(512)))
+            assertTrue(faultDevice.read(60L, 1, ByteArray(512)))
+            assertTrue(faultDevice.flush())
+            assertEquals(1024L, faultDevice.totalBytesWritten.get())
+            assertEquals(1024L, faultDevice.totalBytesRead.get())
+        }
+    }
 }

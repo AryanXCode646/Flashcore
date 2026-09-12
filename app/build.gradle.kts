@@ -68,7 +68,15 @@ android {
     compose = true
     buildConfig = true
   }
-  testOptions { unitTests { isIncludeAndroidResources = true } }
+  testOptions {
+    unitTests {
+      isIncludeAndroidResources = true
+      all { testTask ->
+        testTask.reports.junitXml.required.set(true)
+        testTask.reports.junitXml.outputLocation.set(layout.buildDirectory.dir("test-results/testDebugUnitTest"))
+      }
+    }
+  }
   dependenciesInfo {
     includeInApk = false
     includeInBundle = true

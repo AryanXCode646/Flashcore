@@ -284,7 +284,12 @@ class LinuxRawDdStrategy : FlashEngineStrategy {
             // -----------------------------------------------------------------
             callback.onPartitionProgress("Synchronizing drive write cache to NAND...", 0.85f)
             callback.onLogMessage("Executing cache flush (SCSI SYNCHRONIZE CACHE)...")
-            device.flush()
+            val flushSuccess = device.flush()
+            if (!flushSuccess) {
+                val err = "SCSI cache synchronize failed on target drive"
+                callback.onLogMessage("ERROR: $err")
+                return@withContext failureResult(err, startTime, totalWritten)
+            }
             callback.onLogMessage("Cache synchronized.")
 
             val durationMs = System.currentTimeMillis() - startTime
