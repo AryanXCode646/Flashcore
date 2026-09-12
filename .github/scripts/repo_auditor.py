@@ -234,6 +234,10 @@ def post_or_update_github_issue(repo: str, token: str, report_content: str) -> N
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     issue_title = f"[Autonomous Audit] FlashCore Security, Concurrency & Quality Report ({today})"
 
+    # Ensure issue body respects GitHub 65,536 character limit
+    issue_body = report_content
+    if len(issue_body) > 60000:
+        issue_body = issue_body[:60000] + "\n\n... *(Report truncated to fit GitHub 65,536 character limit. Full report in Artifacts)*"
     existing_issue_number = find_existing_audit_issue(api_base, headers)
 
     try:
@@ -242,7 +246,7 @@ def post_or_update_github_issue(repo: str, token: str, report_content: str) -> N
             update_res = requests.patch(
                 f"{api_base}/issues/{existing_issue_number}",
                 headers=headers,
-                json={"title": issue_title, "body": report_content},
+                json={"title": issue_title, "body": issue_body},
                 timeout=15
             )
             if update_res.status_code == 200:
@@ -256,7 +260,7 @@ def post_or_update_github_issue(repo: str, token: str, report_content: str) -> N
                 headers=headers,
                 json={
                     "title": issue_title,
-                    "body": report_content,
+                    "body": issue_body,
                     "labels": ["audit", "security", "automated"]
                 },
                 timeout=15
