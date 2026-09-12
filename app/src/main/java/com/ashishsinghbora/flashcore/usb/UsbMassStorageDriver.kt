@@ -251,8 +251,11 @@ class UsbMassStorageDriver(
         val outEp = outEndpoint
         val inEp = inEndpoint
 
+        // A failed DATA_OUT transfer may have reached the device before the host
+        // observed the error, so retrying could duplicate a destructive write.
+        val retryLimit = if (cbw.direction == CommandBlockWrapper.Direction.DATA_OUT) 1 else maxRetries
         var attempt = 0
-        while (attempt < maxRetries) {
+        while (attempt < retryLimit) {
             attempt++
             try {
                 checkDeviceConnected()
@@ -370,14 +373,14 @@ class UsbMassStorageDriver(
             } catch (e: Exception) {
                 if (e is DeviceDisconnectedException) throw e
                 Log.w(TAG, "BOT Transaction failed on attempt $attempt: ${e.message}")
-                if (attempt >= maxRetries) {
+                if (attempt >= retryLimit) {
                     throw if (e is IOException) e else IOException("BOT Transaction exhausted retries", e)
                 }
                 Thread.sleep((100L * attempt))
             }
         }
 
-        throw IOException("BOT Transaction failed after $maxRetries attempts")
+        throw IOException("BOT Transaction failed after $retryLimit attempts")
     }
 
     data class InternalSenseResult(

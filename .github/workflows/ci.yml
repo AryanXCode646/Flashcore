@@ -62,6 +62,9 @@ jobs:
       - name: Assemble Debug APK
         run: ./gradlew assembleDebug --stacktrace
 
+      - name: Assemble Release APK
+        run: ./gradlew assembleRelease --stacktrace
+
       - name: Upload Lint Report
         if: always()
         uses: actions/upload-artifact@v4
