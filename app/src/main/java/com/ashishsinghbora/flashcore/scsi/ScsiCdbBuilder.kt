@@ -286,30 +286,150 @@ object ScsiCdbBuilder {
         )
     }
 
+    /**
+     * Returns the human-readable standard name of a SCSI opcode.
+     */
+    fun getOpcodeName(opcode: Byte): String = when (opcode) {
+        OP_TEST_UNIT_READY -> "TEST_UNIT_READY"
+        OP_REQUEST_SENSE -> "REQUEST_SENSE"
+        OP_INQUIRY -> "INQUIRY"
+        OP_MODE_SENSE_6 -> "MODE_SENSE_6"
+        OP_PREVENT_ALLOW_MEDIUM_REMOVAL -> "PREVENT_ALLOW_MEDIUM_REMOVAL"
+        OP_READ_CAPACITY_10 -> "READ_CAPACITY_10"
+        OP_READ_10 -> "READ_10"
+        OP_WRITE_10 -> "WRITE_10"
+        OP_SYNCHRONIZE_CACHE_10 -> "SYNCHRONIZE_CACHE_10"
+        OP_READ_16 -> "READ_16"
+        OP_WRITE_16 -> "WRITE_16"
+        OP_READ_CAPACITY_16 -> "READ_CAPACITY_16"
+        else -> "OPCODE_0x" + Integer.toHexString(opcode.toInt() and 0xFF).padStart(2, '0').uppercase()
+    }
+
     data class SenseDataResponse(
         val responseCode: Int,
         val senseKey: Int,
         val senseKeyDescription: String,
         val additionalSenseCode: Int,
         val additionalSenseCodeQualifier: Int,
-        val ascDescription: String
-    )
+        val ascDescription: String,
+        val isValid: Boolean = false,
+        val information: Long = 0L,
+        val commandSpecificInfo: Long = 0L,
+        val additionalSenseLength: Int = 0,
+        val isDescriptorFormat: Boolean = false,
+        val rawBytes: ByteArray = ByteArray(0)
+    ) {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is SenseDataResponse) return false
+            if (responseCode != other.responseCode) return false
+            if (senseKey != other.senseKey) return false
+            if (senseKeyDescription != other.senseKeyDescription) return false
+            if (additionalSenseCode != other.additionalSenseCode) return false
+            if (additionalSenseCodeQualifier != other.additionalSenseCodeQualifier) return false
+            if (ascDescription != other.ascDescription) return false
+            if (isValid != other.isValid) return false
+            if (information != other.information) return false
+            if (commandSpecificInfo != other.commandSpecificInfo) return false
+            if (additionalSenseLength != other.additionalSenseLength) return false
+            if (isDescriptorFormat != other.isDescriptorFormat) return false
+            if (!rawBytes.contentEquals(other.rawBytes)) return false
+            return true
+        }
 
+        override fun hashCode(): Int {
+            var result = responseCode
+            result = 31 * result + senseKey
+            result = 31 * result + senseKeyDescription.hashCode()
+            result = 31 * result + additionalSenseCode
+            result = 31 * result + additionalSenseCodeQualifier
+            result = 31 * result + ascDescription.hashCode()
+            result = 31 * result + isValid.hashCode()
+            result = 31 * result + information.hashCode()
+            result = 31 * result + commandSpecificInfo.hashCode()
+            result = 31 * result + additionalSenseLength
+            result = 31 * result + isDescriptorFormat.hashCode()
+            result = 31 * result + rawBytes.contentHashCode()
+            return result
+        }
+
+        fun formattedDiagnostic(): String {
+            val formatStr = if (isDescriptorFormat) "Descriptor" else "Fixed"
+            val validStr = if (isValid) " [Valid Info: 0x${java.lang.Long.toHexString(information)}]" else ""
+            return "Sense: $senseKeyDescription ($formatStr, Key=0x${Integer.toHexString(senseKey)}), $ascDescription (ASC=0x${Integer.toHexString(additionalSenseCode).padStart(2, '0')}, ASCQ=0x${Integer.toHexString(additionalSenseCodeQualifier).padStart(2, '0')})$validStr"
+        }
+    }
+
+    /**
+     * Parses SCSI fixed-format (0x70, 0x71) or descriptor-format (0x72, 0x73) sense data.
+     * Safely handles truncated data, malformed lengths, and unknown codes without throwing exceptions.
+     */
     fun parseRequestSense(data: ByteArray): SenseDataResponse {
-        if (data.size < 14) {
+        if (data.isEmpty()) {
             return SenseDataResponse(
                 responseCode = 0,
                 senseKey = 0,
-                senseKeyDescription = "No Sense Data",
+                senseKeyDescription = "NO SENSE",
                 additionalSenseCode = 0,
                 additionalSenseCodeQualifier = 0,
-                ascDescription = "Unknown"
+                ascDescription = "No Sense Data",
+                rawBytes = data
             )
         }
-        val responseCode = data[0].toInt() and 0x7F
-        val senseKey = data[2].toInt() and 0x0F
-        val asc = data[12].toInt() and 0xFF
-        val ascq = data[13].toInt() and 0xFF
+
+        val rawResponseCode = data[0].toInt() and 0xFF
+        val responseCode = rawResponseCode and 0x7F
+        val isValid = (rawResponseCode and 0x80) != 0
+        val isDescriptorFormat = (responseCode == 0x72 || responseCode == 0x73)
+
+        val senseKey: Int
+        var asc = 0
+        var ascq = 0
+        var information = 0L
+        var commandSpecificInfo = 0L
+        val additionalSenseLength = if (data.size > 7) data[7].toInt() and 0xFF else 0
+
+        if (isDescriptorFormat) {
+            // Descriptor format: Byte 1 is Sense Key, Byte 2 is ASC, Byte 3 is ASCQ
+            senseKey = if (data.size > 1) data[1].toInt() and 0x0F else 0
+            asc = if (data.size > 2) data[2].toInt() and 0xFF else 0
+            ascq = if (data.size > 3) data[3].toInt() and 0xFF else 0
+
+            // Parse optional sense data descriptors starting at offset 8
+            var offset = 8
+            val endOffset = minOf(data.size, 8 + additionalSenseLength)
+            while (offset + 2 <= endOffset) {
+                val descType = data[offset].toInt() and 0xFF
+                val descLen = data[offset + 1].toInt() and 0xFF
+                if (descType == 0x00 && descLen >= 10 && offset + 12 <= endOffset) {
+                    // Information descriptor: 8-byte information
+                    val buf = ByteBuffer.wrap(data, offset + 4, 8).order(ByteOrder.BIG_ENDIAN)
+                    information = buf.long
+                } else if (descType == 0x01 && descLen >= 6 && offset + 8 <= endOffset) {
+                    // Command-specific information descriptor: 4-byte
+                    val buf = ByteBuffer.wrap(data, offset + 4, 4).order(ByteOrder.BIG_ENDIAN)
+                    commandSpecificInfo = buf.int.toLong() and 0xFFFFFFFFL
+                }
+                offset += 2 + descLen
+            }
+        } else {
+            // Fixed format: Byte 2 is Sense Key, Bytes 3..6 is Info, Bytes 8..11 is CmdSpecific, Byte 12 is ASC, Byte 13 is ASCQ
+            senseKey = if (data.size > 2) data[2].toInt() and 0x0F else 0
+            if (data.size >= 7 && isValid) {
+                val buf = ByteBuffer.wrap(data, 3, 4).order(ByteOrder.BIG_ENDIAN)
+                information = buf.int.toLong() and 0xFFFFFFFFL
+            }
+            if (data.size >= 12) {
+                val buf = ByteBuffer.wrap(data, 8, 4).order(ByteOrder.BIG_ENDIAN)
+                commandSpecificInfo = buf.int.toLong() and 0xFFFFFFFFL
+            }
+            if (data.size > 12) {
+                asc = data[12].toInt() and 0xFF
+            }
+            if (data.size > 13) {
+                ascq = data[13].toInt() and 0xFF
+            }
+        }
 
         val keyDesc = when (senseKey) {
             0x00 -> "NO SENSE"
@@ -324,20 +444,75 @@ object ScsiCdbBuilder {
             0x09 -> "VENDOR SPECIFIC"
             0x0A -> "COPY ABORTED"
             0x0B -> "ABORTED COMMAND"
+            0x0C -> "VOLUME OVERFLOW"
+            0x0D -> "MISCOMPARE"
             0x0E -> "MISCOMPARE"
             else -> "UNKNOWN SENSE (0x${Integer.toHexString(senseKey)})"
         }
 
         val ascDesc = when (asc) {
+            0x00 -> when (ascq) {
+                0x00 -> "No additional sense information"
+                0x01 -> "Filemark detected"
+                0x02 -> "End-of-partition/medium detected"
+                0x06 -> "I/O process terminated"
+                else -> "ASC: 0x00, ASCQ: 0x${Integer.toHexString(ascq).padStart(2, '0')}"
+            }
             0x04 -> when (ascq) {
+                0x00 -> "Logical unit not ready, cause not reportable"
                 0x01 -> "Logical unit is in process of becoming ready"
                 0x02 -> "Logical unit not ready, initializing command required"
+                0x03 -> "Logical unit not ready, manual intervention required"
+                0x04 -> "Logical unit not ready, format in progress"
                 else -> "Logical unit not ready"
             }
-            0x28 -> "Not ready to ready change, medium may have changed"
+            0x11 -> when (ascq) {
+                0x00 -> "Unrecovered read error"
+                0x01 -> "Read retries exhausted"
+                0x02 -> "Error too long to correct"
+                else -> "Unrecovered read error"
+            }
+            0x15 -> when (ascq) {
+                0x01 -> "Mechanical positioning error"
+                0x02 -> "Positioning error detected by read of medium"
+                else -> "Random positioning error"
+            }
+            0x17 -> "Recovered data with no error correction applied"
+            0x18 -> "Recovered data with error correction applied"
+            0x20 -> "Invalid command operation code"
+            0x21 -> when (ascq) {
+                0x00 -> "Logical block address out of range"
+                0x01 -> "Invalid element address"
+                else -> "Logical block address out of range"
+            }
+            0x24 -> "Invalid field in CDB"
+            0x25 -> "Logical unit not supported"
+            0x26 -> "Invalid field in parameter list"
             0x27 -> "Write protected"
-            0x29 -> "Power on, reset, or bus device reset occurred"
-            0x3A -> "Medium not present"
+            0x28 -> "Not ready to ready change, medium may have changed"
+            0x29 -> when (ascq) {
+                0x01 -> "Power on occurred"
+                0x02 -> "SCSI bus reset occurred"
+                0x03 -> "Bus device reset function occurred"
+                0x04 -> "Device internal reset"
+                else -> "Power on, reset, or bus device reset occurred"
+            }
+            0x2A -> when (ascq) {
+                0x01 -> "Mode parameters changed"
+                else -> "Parameters changed"
+            }
+            0x3A -> when (ascq) {
+                0x01 -> "Medium not present, tray closed"
+                0x02 -> "Medium not present, tray open"
+                else -> "Medium not present"
+            }
+            0x3F -> when (ascq) {
+                0x01 -> "Microcode has been changed"
+                else -> "Target operating conditions have changed"
+            }
+            0x44 -> "Internal target failure"
+            0x47 -> "SCSI parity error"
+            0x4E -> "Overlapped commands attempted"
             else -> "ASC: 0x${Integer.toHexString(asc).padStart(2, '0')}, ASCQ: 0x${Integer.toHexString(ascq).padStart(2, '0')}"
         }
 
@@ -347,7 +522,13 @@ object ScsiCdbBuilder {
             senseKeyDescription = keyDesc,
             additionalSenseCode = asc,
             additionalSenseCodeQualifier = ascq,
-            ascDescription = ascDesc
+            ascDescription = ascDesc,
+            isValid = isValid,
+            information = information,
+            commandSpecificInfo = commandSpecificInfo,
+            additionalSenseLength = additionalSenseLength,
+            isDescriptorFormat = isDescriptorFormat,
+            rawBytes = data.copyOf()
         )
     }
 
