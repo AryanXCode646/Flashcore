@@ -124,13 +124,17 @@ def filter_diff(diff_text: str, max_chars: int = 80000) -> tuple[str, bool]:
     lines = diff_text.splitlines()
     filtered_lines = []
     skip_current_file = False
+    ignored_exts = {
+        ".png", ".jpg", ".jpeg", ".webp", ".ico", ".svg", ".jar", ".jks", ".keystore",
+        ".aar", ".so", ".bin", ".iso"
+    }
 
     for line in lines:
         if line.startswith("diff --git"):
-            skip_current_file = any(line.endswith(ext) for ext in [
-                ".png", ".jpg", ".webp", ".ico", ".svg", ".jar", ".jks", ".keystore",
-                "gradle-wrapper.jar", "package-lock.json"
-            ])
+            parts = line.strip().split()
+            filepath = parts[-1] if len(parts) >= 4 else ""
+            ext = Path(filepath).suffix.lower()
+            skip_current_file = ext in ignored_exts or any(f in filepath for f in ["gradle-wrapper.jar", "package-lock.json"])
         if not skip_current_file:
             filtered_lines.append(line)
 

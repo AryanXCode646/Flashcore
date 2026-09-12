@@ -43,44 +43,39 @@ SUBSYSTEM_MAP = {
         "title": "SCSI-2 / SPC-4 / SBC-3 & USB Mass Storage Pipeline",
         "description": "Low-level USB Bulk-Only Transport (BOT), Command Block Wrappers (CBW), Status Wrappers (CSW), and SCSI CDB builders.",
         "patterns": [
-            "app/src/main/java/com/ashishsinghbora/flashcore/scsi/*.kt",
-            "app/src/main/java/com/ashishsinghbora/flashcore/usb/*.kt",
+            "app/src/main/java/com/ashishsinghbora/flashcore/scsi/**/*.kt",
+            "app/src/main/java/com/ashishsinghbora/flashcore/usb/**/*.kt",
         ]
     },
     "partition_fat32": {
         "title": "Partitioning Engine & FAT32 File System Formatter",
         "description": "MBR/GPT partition tables, alignment math, FAT32 boot sectors, cluster allocation tables, directory entries, and FsInfo.",
         "patterns": [
-            "app/src/main/java/com/ashishsinghbora/flashcore/partition/*.kt",
-            "app/src/main/java/com/ashishsinghbora/flashcore/fat32/*.kt",
+            "app/src/main/java/com/ashishsinghbora/flashcore/partition/**/*.kt",
+            "app/src/main/java/com/ashishsinghbora/flashcore/fat32/**/*.kt",
         ]
     },
     "flasher_engine": {
         "title": "FSM State Machine & Flashing Strategies",
         "description": "Deterministic lifecycle state machine, FlashSafetyValidator, Linux raw dd, Ventoy, and Windows UEFI strategies.",
         "patterns": [
-            "app/src/main/java/com/ashishsinghbora/flashcore/flasher/fsm/*.kt",
-            "app/src/main/java/com/ashishsinghbora/flashcore/flasher/safety/*.kt",
-            "app/src/main/java/com/ashishsinghbora/flashcore/flasher/strategies/*.kt",
-            "app/src/main/java/com/ashishsinghbora/flashcore/flasher/ventoy/*.kt",
-            "app/src/main/java/com/ashishsinghbora/flashcore/flasher/windows/*.kt",
-            "app/src/main/java/com/ashishsinghbora/flashcore/flasher/verification/*.kt",
+            "app/src/main/java/com/ashishsinghbora/flashcore/flasher/**/*.kt",
         ]
     },
     "dsa_storage_io": {
         "title": "DSA, Off-Heap Direct Ring Buffer & ISO Parser",
         "description": "SPSC DirectByteBuffer ring buffer, block devices, rolling checksums, El Torito ISO9660 parser, and WimChunker.",
         "patterns": [
-            "app/src/main/java/com/ashishsinghbora/flashcore/dsa/*.kt",
-            "app/src/main/java/com/ashishsinghbora/flashcore/block/*.kt",
-            "app/src/main/java/com/ashishsinghbora/flashcore/iso/*.kt",
+            "app/src/main/java/com/ashishsinghbora/flashcore/dsa/**/*.kt",
+            "app/src/main/java/com/ashishsinghbora/flashcore/block/**/*.kt",
+            "app/src/main/java/com/ashishsinghbora/flashcore/iso/**/*.kt",
         ]
     },
     "platform_security": {
         "title": "Android Platform, Foreground Service & App Manifest",
         "description": "Foreground execution lifecycle, wakelocks, permissions, build configurations, and AndroidManifest declarations.",
         "patterns": [
-            "app/src/main/java/com/ashishsinghbora/flashcore/service/*.kt",
+            "app/src/main/java/com/ashishsinghbora/flashcore/service/**/*.kt",
             "app/src/main/java/com/ashishsinghbora/flashcore/MainActivity.kt",
             "app/src/main/AndroidManifest.xml",
             "app/build.gradle.kts",
