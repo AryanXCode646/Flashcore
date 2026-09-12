@@ -3,8 +3,8 @@
 FlashCore Autonomous Codebase Auditor & Security Inspector.
 
 Scans the FlashCore codebase, leverages Google GenAI SDK (gemini-2.5-flash with
-resilient fallback to gemini-3.6-flash / gemini-2.0-flash), and performs deep
-static and architectural analysis across:
+resilient fallback across models), and performs deep static and architectural
+analysis across:
 1. Security Flaws (SSRF, raw block device bounds, path traversal, permission exposure)
 2. Race Conditions & Concurrency (Kotlin coroutines, ring buffer pointers, USB bulk async)
 3. Memory & Resource Leaks (DirectByteBuffer off-heap allocations, USB interface unbinding, streams)
@@ -193,11 +193,9 @@ Please execute your thorough security, concurrency, memory, correctness, and arc
             err_str = str(e)
             last_error = e
             print(f"[!] Model '{model_name}' audit failed for subsystem {subsystem_key}: {err_str}")
-            if "NOT_FOUND" in err_str or "no longer available" in err_str or "404" in err_str:
-                continue
-            else:
-                break
-    return f"Error executing Gemini audit for subsystem {subsystem_key}: {last_error}", candidate_models[-1]
+            continue
+
+    return f"Error executing Gemini audit for subsystem {subsystem_key}: {last_error}", primary_model
 
 
 def post_or_update_github_issue(repo: str, token: str, report_content: str) -> None:
@@ -215,12 +213,12 @@ def post_or_update_github_issue(repo: str, token: str, report_content: str) -> N
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     issue_title = f"[Autonomous Audit] FlashCore Security, Concurrency & Quality Report ({today})"
 
-    # Check for existing open issue with audit label or matching title
+    # Check for existing open issue with audit label or matching title (using pagination)
     try:
         issues_res = requests.get(
             f"{api_base}/issues",
             headers=headers,
-            params={"state": "open", "labels": "audit", "per_page": 10},
+            params={"state": "open", "labels": "audit", "per_page": 100},
             timeout=15
         )
         existing_issue_number = None

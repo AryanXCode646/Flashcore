@@ -3,9 +3,8 @@
 FlashCore Autonomous AI Pull Request Code Reviewer.
 
 Inspects PR code diffs using Google GenAI SDK (gemini-2.5-flash with automatic
-resilient fallback to gemini-3.6-flash/gemini-2.0-flash) and posts
-constructive, high-signal security, concurrency, correctness, and architectural
-feedback directly onto the GitHub Pull Request.
+resilient fallback across models) and posts constructive, high-signal security,
+concurrency, correctness, and architectural feedback directly onto the GitHub Pull Request.
 """
 
 import os
@@ -145,7 +144,7 @@ def filter_diff(diff_text: str, max_chars: int = 80000) -> tuple[str, bool]:
 
 
 def generate_review(client: "genai.Client", primary_model: str, pr_info: dict, diff_text: str) -> tuple[str, str]:
-    """Generate constructive review using Gemini with automatic fallback if a model is deprecated."""
+    """Generate constructive review using Gemini with automatic resilient fallback."""
     prompt = f"""
 Pull Request #{pr_info.get('number', 'N/A')}: {pr_info.get('title', 'Unknown')}
 Author: {pr_info.get('author', 'Unknown')}
@@ -183,15 +182,14 @@ Please execute your autonomous review following the specified criteria and forma
             err_str = str(e)
             last_error = e
             print(f"[!] Model '{model_name}' invocation failed: {err_str}")
-            if "NOT_FOUND" in err_str or "no longer available" in err_str or "404" in err_str:
-                continue
-            else:
-                break
-    return f"Error executing Gemini review: {last_error}", candidate_models[-1]
+            # Continuously attempt next candidate model on any API rejection or rate limit
+            continue
+
+    return f"Error executing Gemini review: {last_error}", primary_model
 
 
 def post_or_update_pr_comment(repo: str, pr_number: int, token: str, review_body: str, model_used: str) -> None:
-    """Post or update review comment on the PR."""
+    """Post or update review comment on the PR with pagination support."""
     headers = {
         "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json",
@@ -203,7 +201,7 @@ def post_or_update_pr_comment(repo: str, pr_number: int, token: str, review_body
     tagged_body = f"{PR_REVIEW_TAG}\n{review_body}\n\n---\n*Reviewed autonomously by `{model_used}` via `google-genai` SDK.*"
 
     try:
-        res = requests.get(url_comments, headers=headers, timeout=15)
+        res = requests.get(url_comments, headers=headers, params={"per_page": 100}, timeout=15)
         existing_comment_id = None
         if res.status_code == 200:
             for comment in res.json():
@@ -328,7 +326,7 @@ def main():
 
     # Post comment to PR
     if token and repo and pr_number and not args.dry_run:
-        post_or_update_pr_comment(repo, pr_number, token, review_output, model_used)
+        post_or_update_pr_comment(repo, pr_number, token, review_body=review_output, model_used=model_used)
 
     write_step_summary(f"{review_output}\n\n*(Diff characters reviewed: {len(filtered_diff)}, Model: `{model_used}`)*")
     print("[✓] PR review workflow finished successfully.")
