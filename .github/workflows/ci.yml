@@ -44,11 +44,17 @@ jobs:
       - name: Grant Execute Permission for Gradlew
         run: chmod +x gradlew
 
-      - name: Run Forensic Claims Audit
-        run: python3 scripts/audit_claims.py
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
-      - name: Run Forensic Claims Audit Tests
-        run: python3 scripts/test_audit_claims.py -v
+      - name: Validate Automation & Claims Scripts
+        run: |
+          python3 -c "import py_compile, glob; [py_compile.compile(f, doraise=True) for f in glob.glob('scripts/*.py') + glob.glob('.github/scripts/*.py')]"
+          python3 scripts/test_automation_scripts.py -v
+          python3 scripts/audit_claims.py
+          python3 scripts/test_audit_claims.py -v
 
       - name: Run Android Lint
         run: ./gradlew lint --stacktrace
@@ -61,6 +67,9 @@ jobs:
 
       - name: Assemble Debug APK
         run: ./gradlew assembleDebug --stacktrace
+
+      - name: Assemble Release APK
+        run: ./gradlew assembleRelease --stacktrace
 
       - name: Upload Lint Report
         if: always()
