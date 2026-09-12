@@ -3,14 +3,16 @@
 FlashCore Autonomous AI Pull Request Code Reviewer.
 
 Inspects PR code diffs using Google GenAI SDK (gemini-2.5-flash with automatic
-resilient fallback across models) and posts constructive, high-signal security,
-concurrency, correctness, and architectural feedback directly onto the GitHub Pull Request.
+resilient fallback across models and retry on transient 503/429) and posts
+constructive, high-signal security, concurrency, correctness, and architectural
+feedback directly onto the GitHub Pull Request.
 """
 
 import os
 import sys
 import re
 import json
+import time
 import argparse
 import datetime
 from pathlib import Path
@@ -148,7 +150,7 @@ def filter_diff(diff_text: str, max_chars: int = 80000) -> tuple[str, bool]:
 
 
 def generate_review(client: "genai.Client", primary_model: str, pr_info: dict, diff_text: str) -> tuple[str, str]:
-    """Generate constructive review using Gemini with automatic resilient fallback."""
+    """Generate constructive review using Gemini with automatic resilient fallback and backoff."""
     prompt = f"""
 Pull Request #{pr_info.get('number', 'N/A')}: {pr_info.get('title', 'Unknown')}
 Author: {pr_info.get('author', 'Unknown')}
@@ -163,30 +165,35 @@ Below is the unified git diff of this pull request:
 Please execute your autonomous review following the specified criteria and formatting.
 """
     candidate_models = [primary_model]
-    for m in ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+    for m in ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.0-flash"]:
         if m not in candidate_models:
             candidate_models.append(m)
 
     last_error = None
     for model_name in candidate_models:
-        try:
-            print(f"[*] Calling Gemini model '{model_name}'...")
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.2,
-                    top_p=0.95,
-                    system_instruction=REVIEW_SYSTEM_INSTRUCTION
+        for attempt in range(3):
+            try:
+                print(f"[*] Calling Gemini model '{model_name}' (attempt {attempt + 1})...")
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.2,
+                        top_p=0.95,
+                        system_instruction=REVIEW_SYSTEM_INSTRUCTION
+                    )
                 )
-            )
-            if response and response.text:
-                return response.text, model_name
-        except Exception as e:
-            err_str = str(e)
-            last_error = e
-            print(f"[!] Model '{model_name}' invocation failed: {err_str}")
-            continue
+                if response and response.text:
+                    return response.text, model_name
+            except Exception as e:
+                err_str = str(e)
+                last_error = e
+                print(f"[!] Model '{model_name}' (attempt {attempt + 1}) failed: {err_str}")
+                if "503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                else:
+                    break  # Non-transient error (e.g. 404), move to next candidate model
 
     return f"Error executing Gemini review: {last_error}", primary_model
 
