@@ -3,8 +3,8 @@
 FlashCore Autonomous Codebase Auditor & Security Inspector.
 
 Scans the FlashCore codebase, leverages Google GenAI SDK (gemini-2.5-flash with
-resilient fallback across models), and performs deep static and architectural
-analysis across:
+resilient fallback across models and retry on transient 503/429), and performs
+deep static and architectural analysis across:
 1. Security Flaws (SSRF, raw block device bounds, path traversal, permission exposure)
 2. Race Conditions & Concurrency (Kotlin coroutines, ring buffer pointers, USB bulk async)
 3. Memory & Resource Leaks (DirectByteBuffer off-heap allocations, USB interface unbinding, streams)
@@ -154,7 +154,7 @@ def bundle_code_content(repo_root: Path, file_paths: list[Path], max_chars_per_f
 
 
 def run_gemini_audit(client: "genai.Client", primary_model: str, subsystem_key: str, sub_info: dict, code_bundle: str) -> tuple[str, str]:
-    """Invoke Gemini model via google-genai SDK to audit the subsystem code bundle with resilient fallback."""
+    """Invoke Gemini model via google-genai SDK to audit the subsystem code bundle with resilient fallback and backoff."""
     prompt = f"""
 Audit Subsystem: {sub_info['title']} ({subsystem_key})
 Description: {sub_info['description']}
@@ -166,29 +166,34 @@ The source files belonging to this subsystem are provided below:
 Please execute your thorough security, concurrency, memory, correctness, and architectural review now.
 """
     candidate_models = [primary_model]
-    for m in ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+    for m in ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.0-flash"]:
         if m not in candidate_models:
             candidate_models.append(m)
 
     last_error = None
     for model_name in candidate_models:
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.2,
-                    top_p=0.95,
-                    system_instruction=SYSTEM_INSTRUCTION
+        for attempt in range(3):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.2,
+                        top_p=0.95,
+                        system_instruction=SYSTEM_INSTRUCTION
+                    )
                 )
-            )
-            if response and response.text:
-                return response.text, model_name
-        except Exception as e:
-            err_str = str(e)
-            last_error = e
-            print(f"[!] Model '{model_name}' audit failed for subsystem {subsystem_key}: {err_str}")
-            continue
+                if response and response.text:
+                    return response.text, model_name
+            except Exception as e:
+                err_str = str(e)
+                last_error = e
+                print(f"[!] Model '{model_name}' (attempt {attempt + 1}) audit failed for subsystem {subsystem_key}: {err_str}")
+                if "503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                else:
+                    break
 
     return f"Error executing Gemini audit for subsystem {subsystem_key}: {last_error}", primary_model
 
